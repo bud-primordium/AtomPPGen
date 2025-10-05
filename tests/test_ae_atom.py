@@ -216,18 +216,19 @@ class TestAEAtomResult:
     @pytest.mark.unit
     def test_nist_comparison(self):
         """与 NIST 参考数据对比（记录差异）"""
-        # 快速测试
+        # 快速测试（LDA 模式）
         result = solve_ae_atom(
-            Z=13, xc="PZ81", grid_type="exp_transformed",
+            Z=13, xc="PZ81", spin_mode="LDA",  # 明确使用 LDA
+            grid_type="exp_transformed",
             grid_params={"n": 600},
             scf_params={"tol": 1e-6, "maxiter": 100}
         )
 
-        # NIST LSD 参考值（可能含相对论修正）
+        # NIST LSD 参考值（自旋极化）
         nist_3s_up = -0.296278
         nist_total = -241.321156
 
-        # 我们的结果（非相对论）
+        # 我们的结果（LDA，自旋对称）
         our_3s = result.eps_by_l[0][2]
         our_total = result.energies["E_total"]
 
@@ -235,8 +236,7 @@ class TestAEAtomResult:
         diff_3s = abs(our_3s - nist_3s_up)
         diff_total = abs(our_total - nist_total)
 
-        # 价层轨道差异应 < 0.05 Ha
-        assert diff_3s < 0.05, f"3s 与 NIST 差异 {diff_3s:.3f} Ha 过大"
-
-        # 总能量差异应 < 6 Ha（非相对论 vs 相对论）
-        assert diff_total < 6.0, f"总能量与 NIST 差异 {diff_total:.3f} Ha 过大"
+        # LDA 与 LSDA 对开壳层原子有差异，阈值放宽至 0.06 Ha
+        assert diff_3s < 0.06, f"3s 与 NIST 差异 {diff_3s:.3f} Ha 过大"
+        # 总能量差异应 < 5 Ha（系统性偏差）
+        assert diff_total < 5.0, f"总能量与 NIST 差异 {diff_total:.3f} Ha 过大"

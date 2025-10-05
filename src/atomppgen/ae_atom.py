@@ -83,12 +83,16 @@ def solve_ae_atom(
     grid_type: str = "exp_transformed",
     grid_params: Optional[Dict] = None,
     scf_params: Optional[Dict] = None,
+    spin_mode: str = "LDA",
 ) -> AEAtomResult:
     """
     求解全电子原子的 LDA 自洽场解
 
     **推荐配置**：使用 `grid_type="exp_transformed"` + `eig_solver="transformed"`
     以获得最高精度（相比 FD5 方法精度提升约 7 倍）。
+
+    **赝势生成注意**：必须使用 `spin_mode="LDA"`（自旋无关势），这是标准
+    赝势格式（如 UPF）的要求。
 
     Parameters
     ----------
@@ -105,12 +109,17 @@ def solve_ae_atom(
         - "log": 对数网格 + Numerov/FD5 求解器
     grid_params : dict, optional
         网格参数，例如：
-        - exp_transformed: {"n": 1200, "rmin": 0.0, "rmax": 120.0, "total_span": 6.5}
+        - exp_transformed: {"n": 2000, "rmin": 0.0, "rmax": 150.0, "total_span": 7.0}
         - linear: {"n": 1200, "rmin": 1e-6, "rmax": 50.0}
         - log: {"n": 1000, "rmin": 1e-6, "rmax": 50.0}
     scf_params : dict, optional
         SCF 参数，例如：
-        - {"tol": 1e-7, "maxiter": 200, "mix_alpha": 0.25}
+        - {"tol": 1e-6, "maxiter": 150, "mix_alpha": 0.3}
+    spin_mode : str, optional
+        自旋模式：
+        - "LDA": 强制自旋对称（n_up = n_dn），**赝势生成必须用此模式**
+        - "LSDA": 自旋极化（n_up ≠ n_dn），适合开壳层原子的全电子计算
+        默认 "LDA"
 
     Returns
     -------
@@ -122,31 +131,39 @@ def solve_ae_atom(
     ValueError
         如果 xc 不是 "PZ81" 或 "VWN"
         如果 grid_type 不支持
+        如果 spin_mode 不是 "LDA" 或 "LSDA"
 
     Examples
     --------
-    >>> # 推荐用法：变量变换方法（最高精度）
-    >>> result = solve_ae_atom(Z=13, xc="PZ81", grid_type="exp_transformed")
+    >>> # 推荐用法：LDA 模式（赝势生成）
+    >>> result = solve_ae_atom(Z=13, spin_mode="LDA", grid_type="exp_transformed")
     >>> print(f"3s energy: {result.eps_by_l[0][2]:.6f} Ha")
     >>> print(f"3p energy: {result.eps_by_l[1][2]:.6f} Ha")
 
     Notes
     -----
+    **LDA vs LSDA**：
+    - LDA 强制 n_up = n_dn，产生自旋无关势（UPF 格式要求）
+    - LSDA 允许 n_up ≠ n_dn，更适合描述开壳层原子
+    - 对于闭壳层原子（如 C），两者结果相同
+
     **与 NIST 参考数据的差异**：
-    当前实现为非相对论 LSDA，与 NIST 的 LSD 数据（可能含相对论修正）
-    存在系统性差异（Al 总能量差约 4 Ha，内层轨道差 0.8 Ha）。
+    AtomSCF 当前精度约 1.5-2.5%（相对于 NIST LSD 数据）。
     对于赝势生成，价层轨道相对精度（~0.03 Ha）通常已足够。
 
     References
     ----------
     - 变量变换方法：AtomSCF/docs/source/algorithm/numerical_methods.rst
     - NIST 原子数据：https://www.nist.gov/pml/atomic-reference-data-electronic-structure-calculations
+    - AtomSCF 更新日志：.workenv/For_AtomSCF/progress/1005_finalize/usage_supply.md
     """
     # 验证输入
     if xc not in ("PZ81", "VWN"):
         raise ValueError(f"xc must be 'PZ81' or 'VWN', got '{xc}'")
     if grid_type not in ("linear", "log", "exp_transformed"):
         raise ValueError(f"grid_type must be 'linear', 'log', or 'exp_transformed', got '{grid_type}'")
+    if spin_mode not in ("LDA", "LSDA"):
+        raise ValueError(f"spin_mode must be 'LDA' or 'LSDA', got '{spin_mode}'")
 
     # 设置默认网格参数
     if grid_params is None:
@@ -198,6 +215,7 @@ def solve_ae_atom(
         mix_alpha=mix_alpha,
         tol=tol,
         maxiter=maxiter,
+        spin_mode=spin_mode,  # 新增：传递自旋模式
     )
 
     # 变量变换方法需要额外参数
