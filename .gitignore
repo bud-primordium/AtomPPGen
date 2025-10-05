@@ -39,6 +39,11 @@ htmlcov/
 *.swo
 *~
 
+# Documentation
+docs/build/
+docs/source/_autosummary/
+docs/source/generated/
+
 # Project specific
 outputs/
 *.log

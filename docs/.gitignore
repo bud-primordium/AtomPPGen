@@ -1,0 +1,9 @@
+# Sphinx build outputs
+build/
+_build/
+_autosummary/
+generated/
+
+# Backup files
+*~
+*.bak
