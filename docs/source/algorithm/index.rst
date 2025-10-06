@@ -6,11 +6,8 @@
 .. toctree::
    :maxdepth: 2
 
-   ae_solve
    tm_method
    potential_inversion
-   kb_transformation
-   transferability
 
 概述
 ----

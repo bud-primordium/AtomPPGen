@@ -11,6 +11,7 @@ API 参考
 
    ae_atom
    tm
+   invert
 
 模块概览
 --------
@@ -21,3 +22,4 @@ API 参考
 
    atomppgen.ae_atom
    atomppgen.tm
+   atomppgen.invert
