@@ -238,7 +238,7 @@ TM 伪化内部采用以下保护措施：
   **Phys. Rev. B** 43, 1993-2006 (1991).
   DOI: `10.1103/PhysRevB.43.1993 <https://doi.org/10.1103/PhysRevB.43.1993>`_
 
-- **算法细节**：:doc:`../algorithm/tm_method`
+- **QE 实现指南**：P. Giannozzi, *Notes on pseudopotential generation* (2019),
+  https://www.quantum-espresso.org/wp-content/uploads/2022/03/pseudo-gen.pdf
 
-- **dftatom 实现**：Ondřej Čertík et al.,
-  `<https://github.com/certik/dftatom>`_
+- **算法细节**：:doc:`../algorithm/tm_method`

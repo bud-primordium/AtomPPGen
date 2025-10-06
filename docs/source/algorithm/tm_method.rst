@@ -152,10 +152,10 @@ TM 方法
 
    :code:`fsolve` 的容差设为 :code:`xtol=1e-8, maxfev=1000`。
 
-参考实现
---------
+数值实现指南
+------------
 
-伪代码
+伪代码框架
 ~~~~~~
 
 .. code-block:: python
@@ -223,8 +223,6 @@ TM 方法
   *Phys. Rev. B* **43**, 1993-2006 (1991).
   方程 (14)-(18) 定义了 TM 方法的核心公式。
 
-- **QE 文档**：P. Giannozzi, *Notes on pseudopotential generation*,
-  第 2.2 节详细说明了伪化能量和截断半径的选择。
-
-- **实现参考**：dftatom (Ondřej Čertík et al.),
-  `<https://github.com/certik/dftatom>`_
+- **QE 实现指南**：P. Giannozzi, *Notes on pseudopotential generation* (2019),
+  第 2.2-2.3 节详细说明了 TM 伪化、截断半径选择与实现要点。
+  https://www.quantum-espresso.org/wp-content/uploads/2022/03/pseudo-gen.pdf
