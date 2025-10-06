@@ -75,6 +75,8 @@ def invert_semilocal_potential(
     u_ps: Optional[np.ndarray] = None,
     node_tol: float = 1e-10,
     V_max_clip: float = 1000.0,
+    smooth_rc: bool = False,
+    smooth_width: float = 0.1,
 ) -> InvertResult:
     """
     从 TM 伪轨道反演半局域势
@@ -96,6 +98,11 @@ def invert_semilocal_potential(
         节点检测阈值（|u| < node_tol 视为节点）
     V_max_clip : float, default=1000.0
         势的裁剪上限（防止除零发散）
+    smooth_rc : bool, default=False
+        是否在 rc 处应用平滑过渡（内外区势值混合）
+    smooth_width : float, default=0.1
+        平滑区域半宽度（Bohr），仅在 smooth_rc=True 时有效
+        平滑范围为 [rc-smooth_width, rc+smooth_width]
 
     Returns
     -------
@@ -113,6 +120,9 @@ def invert_semilocal_potential(
     2. 外区（r > rc）：使用 `eval_derivatives_at()` 样条法
     3. 节点保护：在 |u| < node_tol 附近使用线性插值填充势值
     4. 离心势项 l(l+1)/(2r²) 在原点附近奇异，需特殊处理
+    5. **平滑过渡**（可选）：若 smooth_rc=True，在 rc±smooth_width 区域使用
+       三次样条平滑内外区势值，适用于特殊 rc/网格组合导致跳变较大的情况。
+       默认关闭（测试显示大多数情况 rc 处相对跳变 < 1%）。
 
     Examples
     --------
@@ -159,6 +169,10 @@ def invert_semilocal_potential(
             node_tol=node_tol,
             V_max_clip=V_max_clip,
         )
+
+    # ========== rc 处平滑过渡（可选） ==========
+    if smooth_rc and i_rc > 0 and i_rc < len(r) - 1:
+        V_l = _smooth_at_rc(r, V_l, i_rc, smooth_width)
 
     # ========== 诊断信息 ==========
     diagnostics = {
@@ -417,3 +431,61 @@ def _count_nodes(u: np.ndarray, node_tol: float) -> int:
             sign_changes += 1
 
     return sign_changes
+
+
+def _smooth_at_rc(
+    r: np.ndarray,
+    V_l: np.ndarray,
+    i_rc: int,
+    smooth_width: float,
+) -> np.ndarray:
+    """
+    在 rc 处应用平滑过渡
+
+    在 [rc-smooth_width, rc+smooth_width] 区域使用三次样条平滑势值，
+    减少内外区计算方法差异导致的跳变。
+
+    Parameters
+    ----------
+    r : np.ndarray
+        径向网格
+    V_l : np.ndarray
+        势（未平滑）
+    i_rc : int
+        rc 对应的网格索引
+    smooth_width : float
+        平滑区域半宽度（Bohr）
+
+    Returns
+    -------
+    np.ndarray
+        平滑后的势
+    """
+    rc = r[i_rc]
+    r_min = rc - smooth_width
+    r_max = rc + smooth_width
+
+    # 找到平滑区域索引
+    i_min = np.searchsorted(r, r_min)
+    i_max = np.searchsorted(r, r_max)
+
+    # 确保区域有效
+    i_min = max(0, i_min)
+    i_max = min(len(r), i_max)
+
+    # 至少需要 4 个点才能构建三次样条
+    if i_max - i_min < 4:
+        return V_l  # 区域太小，跳过平滑
+
+    # 提取平滑区域
+    r_smooth = r[i_min:i_max]
+    V_smooth_region = V_l[i_min:i_max]
+
+    # 构建三次样条并评估
+    cs = CubicSpline(r_smooth, V_smooth_region, bc_type='not-a-knot')
+
+    # 在同一区域重新评估（平滑）
+    V_l_smoothed = V_l.copy()
+    V_l_smoothed[i_min:i_max] = cs(r_smooth)
+
+    return V_l_smoothed

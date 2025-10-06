@@ -53,3 +53,4 @@ outputs/
 
 # Local working files (MUST NOT be committed)
 .workenv/
+AtomPPGen.xml

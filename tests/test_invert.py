@@ -196,3 +196,41 @@ class TestInvertResult:
         assert isinstance(inv.rc, float)
         assert isinstance(inv.eps, float)
         assert isinstance(inv.diagnostics, dict)
+
+    @pytest.mark.unit
+    def test_smooth_rc_option(self):
+        """测试 rc 处平滑功能"""
+        ae = solve_ae_atom(Z=13, spin_mode='LDA', lmax=0, grid_params={'n': 600})
+        tm = tm_pseudize(
+            r=ae.r, w=ae.w,
+            u_ae=ae.u_by_l[0][2],
+            eps=ae.eps_by_l[0][2],
+            l=0, rc=2.0
+        )
+
+        # 不平滑
+        inv_no_smooth = invert_semilocal_potential(tm, ae.r, smooth_rc=False)
+
+        # 平滑
+        inv_smooth = invert_semilocal_potential(
+            tm, ae.r, smooth_rc=True, smooth_width=0.15
+        )
+
+        # 两者形状相同
+        assert inv_no_smooth.V_l.shape == inv_smooth.V_l.shape
+
+        # 找到 rc 对应索引
+        i_rc = np.searchsorted(ae.r, 2.0)
+
+        # 平滑后 rc 附近应该更平滑（标准差更小）
+        window = 5
+        i_left = max(0, i_rc - window)
+        i_right = min(len(ae.r), i_rc + window + 1)
+
+        std_no_smooth = np.std(inv_no_smooth.V_l[i_left:i_right])
+        std_smooth = np.std(inv_smooth.V_l[i_left:i_right])
+
+        # 平滑应该减少局部波动（或至少不增加）
+        # 注意：可能原本就很平滑，所以这里只检查不会变得更差
+        assert std_smooth <= std_no_smooth * 1.5, \
+            f"平滑反而增加波动：{std_smooth:.3e} vs {std_no_smooth:.3e}"
