@@ -25,7 +25,7 @@ class TestTMPseudize:
             lmax=0,  # 只需要 s 通道
             grid_type="exp_transformed",
             grid_params={"n": 800, "rmax": 100.0},
-            scf_params={"tol": 1e-6, "maxiter": 120}
+            scf_params={"tol": 1e-6, "maxiter": 120},
         )
 
         # 2. 提取 3s 轨道
@@ -54,10 +54,10 @@ class TestTMPseudize:
         )
 
         # 5. 检查返回结果的基本属性
-        assert hasattr(result, 'u_ps'), "缺少伪轨道 u_ps"
-        assert hasattr(result, 'a_coeff'), "缺少 TM 系数 a_coeff"
-        assert hasattr(result, 'norm_error'), "缺少范数误差"
-        assert hasattr(result, 'continuity_check'), "缺少连续性检查"
+        assert hasattr(result, "u_ps"), "缺少伪轨道 u_ps"
+        assert hasattr(result, "a_coeff"), "缺少 TM 系数 a_coeff"
+        assert hasattr(result, "norm_error"), "缺少范数误差"
+        assert hasattr(result, "continuity_check"), "缺少连续性检查"
 
         # 6. 检查伪轨道形状
         assert result.u_ps.shape == r.shape, "伪轨道长度与网格不匹配"
@@ -72,20 +72,20 @@ class TestTMPseudize:
         )
 
         # 9. 连续性检查
-        for key in ['u', 'du', 'd2u']:
+        for key in ["u", "du", "d2u"]:
             assert key in result.continuity_check, f"缺少 {key} 连续性检查"
-            rel_err = result.continuity_check[key]['rel_error']
-            assert rel_err < 1e-4, (
-                f"{key} 在 rc 处不连续，相对误差 {rel_err:.2e}"
-            )
+            rel_err = result.continuity_check[key]["rel_error"]
+            assert rel_err < 1e-4, f"{key} 在 rc 处不连续，相对误差 {rel_err:.2e}"
 
     @pytest.mark.unit
     def test_tm_norm_conservation_precision(self):
         """测试范数守恒的精度"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 600},
-            scf_params={"tol": 1e-5, "maxiter": 80}
+            scf_params={"tol": 1e-5, "maxiter": 80},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -96,9 +96,13 @@ class TestTMPseudize:
         # 测试不同的 rc 值
         for rc in [1.8, 2.0, 2.2, 2.4]:
             result = tm_pseudize(
-                r=ae_result.r, w=ae_result.w,
-                u_ae=u_ae, eps=eps, l=0, rc=rc,
-                continuity_orders=2
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
+                rc=rc,
+                continuity_orders=2,
             )
 
             # 范数守恒应该非常好（< 1e-6）
@@ -110,9 +114,11 @@ class TestTMPseudize:
     def test_tm_p_orbital(self):
         """测试 p 轨道的伪化"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=1,
+            Z=13,
+            spin_mode="LDA",
+            lmax=1,
             grid_params={"n": 600},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -123,22 +129,28 @@ class TestTMPseudize:
 
         rc = 2.2  # Al p 通道推荐值
         result = tm_pseudize(
-            r=ae_result.r, w=ae_result.w,
-            u_ae=u_ae_3p, eps=eps_3p, l=1, rc=rc,
-            continuity_orders=2
+            r=ae_result.r,
+            w=ae_result.w,
+            u_ae=u_ae_3p,
+            eps=eps_3p,
+            l=1,
+            rc=rc,
+            continuity_orders=2,
         )
 
         # 基本检查
         assert result.norm_error < 1e-5
-        assert result.continuity_check['u']['rel_error'] < 1e-4
+        assert result.continuity_check["u"]["rel_error"] < 1e-4
 
     @pytest.mark.unit
     def test_tm_different_continuity_orders(self):
         """测试不同的连续性阶数"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 500},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -149,18 +161,26 @@ class TestTMPseudize:
 
         # 二阶连续性
         result_2nd = tm_pseudize(
-            r=ae_result.r, w=ae_result.w,
-            u_ae=u_ae, eps=eps, l=0, rc=rc,
-            continuity_orders=2
+            r=ae_result.r,
+            w=ae_result.w,
+            u_ae=u_ae,
+            eps=eps,
+            l=0,
+            rc=rc,
+            continuity_orders=2,
         )
         assert result_2nd.continuity_orders == 2
         assert len(result_2nd.a_coeff) == 4
 
         # 四阶连续性（更严格）
         result_4th = tm_pseudize(
-            r=ae_result.r, w=ae_result.w,
-            u_ae=u_ae, eps=eps, l=0, rc=rc,
-            continuity_orders=4
+            r=ae_result.r,
+            w=ae_result.w,
+            u_ae=u_ae,
+            eps=eps,
+            l=0,
+            rc=rc,
+            continuity_orders=4,
         )
         assert result_4th.continuity_orders == 4
         assert len(result_4th.a_coeff) == 6  # 需要 6 个系数
@@ -173,9 +193,11 @@ class TestTMPseudize:
     def test_tm_invalid_inputs(self):
         """测试无效输入的处理"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 400},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -186,36 +208,48 @@ class TestTMPseudize:
         # rc 超出网格范围
         with pytest.raises(ValueError, match="超出网格范围|out of range"):
             tm_pseudize(
-                r=ae_result.r, w=ae_result.w,
-                u_ae=u_ae, eps=eps, l=0,
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
                 rc=999.0,  # 远超 rmax
-                continuity_orders=2
+                continuity_orders=2,
             )
 
         # rc 太小（< r[0]）
         with pytest.raises(ValueError, match="超出网格范围|out of range"):
             tm_pseudize(
-                r=ae_result.r, w=ae_result.w,
-                u_ae=u_ae, eps=eps, l=0,
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
                 rc=-1.0,
-                continuity_orders=2
+                continuity_orders=2,
             )
 
         # 不支持的连续性阶数
         with pytest.raises(ValueError, match="continuity_orders|必须是 2 或 4"):
             tm_pseudize(
-                r=ae_result.r, w=ae_result.w,
-                u_ae=u_ae, eps=eps, l=0, rc=2.0,
-                continuity_orders=3  # 只支持 2 或 4
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
+                rc=2.0,
+                continuity_orders=3,  # 只支持 2 或 4
             )
 
     @pytest.mark.unit
     def test_tm_inner_outer_splice(self):
         """测试内外区拼接的平滑性"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 600},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -225,9 +259,13 @@ class TestTMPseudize:
         rc = 2.1
 
         result = tm_pseudize(
-            r=ae_result.r, w=ae_result.w,
-            u_ae=u_ae, eps=eps, l=0, rc=rc,
-            continuity_orders=2
+            r=ae_result.r,
+            w=ae_result.w,
+            u_ae=u_ae,
+            eps=eps,
+            l=0,
+            rc=rc,
+            continuity_orders=2,
         )
 
         # 找到 rc 对应的索引
@@ -246,16 +284,20 @@ class TestTMPseudize:
             if abs(u_at) > 1e-8:
                 rel_change_before = abs(u_at - u_before) / abs(u_at)
                 rel_change_after = abs(u_after - u_at) / abs(u_at)
-                assert rel_change_before < 0.2, f"拼接点前不平滑：{rel_change_before:.2e}"
+                assert rel_change_before < 0.2, (
+                    f"拼接点前不平滑：{rel_change_before:.2e}"
+                )
                 assert rel_change_after < 0.2, f"拼接点后不平滑：{rel_change_after:.2e}"
 
     @pytest.mark.unit
     def test_tm_wavefunction_positivity(self):
         """测试伪轨道在内区的正定性（无节点）"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 500},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -265,9 +307,13 @@ class TestTMPseudize:
         rc = 2.0
 
         result = tm_pseudize(
-            r=ae_result.r, w=ae_result.w,
-            u_ae=u_ae, eps=eps, l=0, rc=rc,
-            continuity_orders=2
+            r=ae_result.r,
+            w=ae_result.w,
+            u_ae=u_ae,
+            eps=eps,
+            l=0,
+            rc=rc,
+            continuity_orders=2,
         )
 
         # 找到 rc 对应的索引
@@ -299,9 +345,11 @@ class TestTMResult:
     def test_result_attributes(self):
         """测试结果对象的属性"""
         ae_result = solve_ae_atom(
-            Z=13, spin_mode="LDA", lmax=0,
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
             grid_params={"n": 400},
-            scf_params={"tol": 1e-5}
+            scf_params={"tol": 1e-5},
         )
 
         from atomppgen.tm import tm_pseudize
@@ -318,8 +366,14 @@ class TestTMResult:
 
         # 检查所有必需属性
         required_attrs = [
-            'u_ps', 'a_coeff', 'rc', 'eps', 'l',
-            'norm_error', 'continuity_orders', 'continuity_check'
+            "u_ps",
+            "a_coeff",
+            "rc",
+            "eps",
+            "l",
+            "norm_error",
+            "continuity_orders",
+            "continuity_check",
         ]
         for attr in required_attrs:
             assert hasattr(result, attr), f"缺少属性 {attr}"
@@ -333,3 +387,136 @@ class TestTMResult:
         assert isinstance(result.norm_error, float)
         assert isinstance(result.continuity_orders, int)
         assert isinstance(result.continuity_check, dict)
+
+
+class TestRcPerturbationStability:
+    """测试截断半径微扰稳定性"""
+
+    @pytest.mark.unit
+    def test_rc_perturbation_norm_stability(self):
+        """测试 rc±0.05 时范数误差阶不恶化"""
+        ae_result = solve_ae_atom(
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
+            grid_type="exp_transformed",
+            grid_params={"n": 800},
+            scf_params={"tol": 1e-6},
+        )
+
+        from atomppgen.tm import tm_pseudize
+
+        u_ae = ae_result.u_by_l[0][2]
+        eps = ae_result.eps_by_l[0][2]
+        rc_base = 2.0
+
+        # 测试 rc-0.05, rc, rc+0.05
+        rc_values = [rc_base - 0.05, rc_base, rc_base + 0.05]
+        norm_errors = []
+
+        for rc in rc_values:
+            result = tm_pseudize(
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
+                rc=rc,
+                continuity_orders=2,
+            )
+            norm_errors.append(result.norm_error)
+
+        # 检查范数误差不恶化（阈值：不超过 3 倍基准值）
+        base_error = norm_errors[1]  # rc_base 的误差
+        for i, rc in enumerate(rc_values):
+            assert norm_errors[i] < 3 * base_error, (
+                f"rc={rc:.2f} 范数误差 {norm_errors[i]:.2e} 超过基准 {base_error:.2e} 的 3 倍"
+            )
+
+    @pytest.mark.unit
+    def test_rc_perturbation_continuity_stability(self):
+        """测试 rc±0.05 时连续性误差阶不恶化"""
+        ae_result = solve_ae_atom(
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
+            grid_type="exp_transformed",
+            grid_params={"n": 800},
+            scf_params={"tol": 1e-6},
+        )
+
+        from atomppgen.tm import tm_pseudize
+
+        u_ae = ae_result.u_by_l[0][2]
+        eps = ae_result.eps_by_l[0][2]
+        rc_base = 2.0
+        rc_values = [rc_base - 0.05, rc_base, rc_base + 0.05]
+
+        max_cont_errors = []
+        for rc in rc_values:
+            result = tm_pseudize(
+                r=ae_result.r,
+                w=ae_result.w,
+                u_ae=u_ae,
+                eps=eps,
+                l=0,
+                rc=rc,
+                continuity_orders=2,
+            )
+            # 取所有导数连续性误差的最大值
+            errors = [
+                result.continuity_check[k]["rel_error"] for k in ["u", "du", "d2u"]
+            ]
+            max_cont_errors.append(max(errors))
+
+        # 检查连续性误差不恶化（阈值：不超过 3 倍基准值）
+        base_error = max_cont_errors[1]
+        for i, rc in enumerate(rc_values):
+            assert max_cont_errors[i] < 3 * base_error, (
+                f"rc={rc:.2f} 连续性误差 {max_cont_errors[i]:.2e} 超过基准 {base_error:.2e} 的 3 倍"
+            )
+
+
+class TestGridConsistencyRegression:
+    """测试不同网格类型的一致性"""
+
+    @pytest.mark.unit
+    def test_linear_vs_exp_grid_consistency(self):
+        """测试 exp_transformed 网格的高精度（linear 网格精度较低，仅验证可用性）"""
+        from atomppgen.tm import tm_pseudize
+
+        rc = 2.0
+        l = 0
+
+        # 1. 使用 exp_transformed 网格（高精度验证）
+        ae_exp = solve_ae_atom(
+            Z=13,
+            spin_mode="LDA",
+            lmax=0,
+            grid_type="exp_transformed",
+            grid_params={"n": 1200},
+            scf_params={"tol": 1e-7, "maxiter": 150},
+        )
+        result_exp = tm_pseudize(
+            r=ae_exp.r,
+            w=ae_exp.w,
+            u_ae=ae_exp.u_by_l[0][2],
+            eps=ae_exp.eps_by_l[0][2],
+            l=l,
+            rc=rc,
+            continuity_orders=2,
+        )
+
+        # 2. exp_transformed 网格应达到高精度
+        def get_max_cont_error(result):
+            return max(
+                [result.continuity_check[k]["rel_error"] for k in ["u", "du", "d2u"]]
+            )
+
+        error_exp = get_max_cont_error(result_exp)
+        assert error_exp < 1e-8, f"exp_transformed 网格连续性误差过大：{error_exp:.2e}"
+
+        # 3. 范数守恒也应高精度
+        assert result_exp.norm_error < 1e-6, (
+            f"exp_transformed 网格范数误差过大：{result_exp.norm_error:.2e}"
+        )

@@ -11,10 +11,6 @@ API 参考
 
    ae_atom
    tm
-   invert
-   kb
-   validate
-   io
 
 模块概览
 --------
@@ -25,7 +21,3 @@ API 参考
 
    atomppgen.ae_atom
    atomppgen.tm
-   atomppgen.invert
-   atomppgen.kb
-   atomppgen.validate
-   atomppgen.io

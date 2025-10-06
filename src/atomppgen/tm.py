@@ -22,6 +22,7 @@ from typing import Dict, Optional
 import numpy as np
 from scipy.optimize import fsolve
 from scipy.integrate import simpson
+from scipy.interpolate import CubicSpline
 
 
 __all__ = [
@@ -54,6 +55,8 @@ class TMResult:
         连续性阶数（匹配到几阶导数，2 或 4）
     continuity_check : Dict
         rc 处的连续性检查结果 {'u': {...}, 'du': {...}, 'd2u': {...}}
+    solver_info : Dict
+        求解器收敛信息 {'ier': int, 'nfev': int, 'mesg': str, 'fallback': bool}
     """
     u_ps: np.ndarray
     a_coeff: np.ndarray
@@ -63,6 +66,7 @@ class TMResult:
     norm_error: float
     continuity_orders: int
     continuity_check: Dict
+    solver_info: Dict
 
 
 def tm_pseudize(
@@ -121,6 +125,8 @@ def tm_pseudize(
        - continuity_orders = 4: 需要 6 个系数 [a_0, ..., a_10]
     2. 数值稳定性：使用对数形式避免指数溢出
     3. 范数守恒通过非线性方程组保证（scipy.optimize.fsolve）
+    4. **网格推荐**：强烈建议使用 `exp_transformed` 或 `log` 网格类型。
+       `linear` 网格的导数精度不足，可能导致 TM 非线性方程组不收敛。
 
     References
     ----------
@@ -142,14 +148,14 @@ def tm_pseudize(
     # continuity_orders=4: 5个导数约束(u, ..., u'''') + 1个范数 = 6个方程 → 6个系数
     n_coeffs = continuity_orders + 2
 
-    # 计算 AE 轨道在 rc 处的导数
-    derivs_ae = _eval_derivatives(r, u_ae, i_rc, order=continuity_orders)
+    # 计算 AE 轨道在 rc 处的导数（使用样条法，适用于非均匀网格）
+    derivs_ae = eval_derivatives_at(r, u_ae, rc, max_order=continuity_orders)
 
     # 计算 AE 轨道的内区范数
     norm_ae = _compute_norm(r, w, u_ae, i_rc)
 
     # 求解 TM 系数
-    a_coeff = _solve_tm_coefficients(
+    a_coeff, solver_info = _solve_tm_coefficients(
         rc=rc,
         l=l,
         derivs_ae=derivs_ae,
@@ -185,7 +191,113 @@ def tm_pseudize(
         norm_error=norm_error,
         continuity_orders=continuity_orders,
         continuity_check=continuity_check,
+        solver_info=solver_info,
     )
+
+
+def eval_derivatives_at(
+    r: np.ndarray,
+    u: np.ndarray,
+    x0: float,
+    max_order: int = 4,
+    window: int = 7,
+    bc: str = "not-a-knot",
+) -> np.ndarray:
+    """
+    在指定点 x0 处计算导数（使用局部三次样条）
+
+    此方法适用于非均匀网格，通过在 x0 邻域构建三次样条插值，
+    在 x0 处直接评估各阶导数。
+
+    Parameters
+    ----------
+    r : np.ndarray
+        径向网格（可以是非均匀的）
+    u : np.ndarray
+        轨道函数
+    x0 : float
+        评估点（例如 rc）
+    max_order : int, default=4
+        最高导数阶数（2 或 4）
+    window : int, default=7
+        窗口大小（以 x0 为中心取点数），推荐 7（±3 点）
+    bc : str, default="not-a-knot"
+        边界条件类型，可选 "not-a-knot", "natural", "clamped"
+
+    Returns
+    -------
+    np.ndarray
+        [u, u', u'', u''', u''''] (根据 max_order 返回相应长度)
+
+    Notes
+    -----
+    - 对于非均匀网格（如 exp_transformed, log），此方法比有限差分更精确
+    - 窗口不足时自动退化到 5 点或 3 点
+    - 靠近边界时允许不对称窗口
+
+    References
+    ----------
+    - scipy.interpolate.CubicSpline
+    - Press et al., *Numerical Recipes*, Section 3.3: Cubic Spline Interpolation
+    """
+    # 找到 x0 的索引
+    i_center = np.searchsorted(r, x0)
+    if i_center >= len(r):
+        i_center = len(r) - 1
+
+    # 确定窗口范围（以 i_center 为中心）
+    half_win = window // 2
+    i_left = max(0, i_center - half_win)
+    i_right = min(len(r), i_center + half_win + 1)
+
+    # 如果窗口太小，尝试扩展到至少 5 点
+    if i_right - i_left < 5:
+        if i_left == 0:
+            i_right = min(len(r), 5)
+        elif i_right == len(r):
+            i_left = max(0, len(r) - 5)
+        else:
+            # 中间区域窗口太小，强制至少 5 点
+            i_left = max(0, i_center - 2)
+            i_right = min(len(r), i_center + 3)
+
+    # 提取窗口
+    r_win = r[i_left:i_right]
+    u_win = u[i_left:i_right]
+
+    # 构建三次样条
+    try:
+        cs = CubicSpline(r_win, u_win, bc_type=bc)
+    except Exception:
+        # 如果样条构建失败，回退到更简单的边界条件
+        cs = CubicSpline(r_win, u_win, bc_type="natural")
+
+    # 在 x0 处评估导数
+    derivs = []
+
+    # u(x0)
+    derivs.append(float(cs(x0)))
+
+    # u'(x0)
+    derivs.append(float(cs.derivative(1)(x0)))
+
+    # u''(x0)
+    derivs.append(float(cs.derivative(2)(x0)))
+
+    if max_order >= 4:
+        # u'''(x0)
+        derivs.append(float(cs.derivative(3)(x0)))
+
+        # u''''(x0) - 三次样条的四阶导数为 0，这里用数值差分近似
+        # 或者在窗口内用五次样条
+        # 简化处理：用三阶导的差商
+        dx = 1e-6
+        d3_plus = cs.derivative(3)(x0 + dx)
+        d3_minus = cs.derivative(3)(x0 - dx)
+        u4 = (d3_plus - d3_minus) / (2 * dx)
+        derivs.append(float(u4))
+
+    return np.array(derivs)
 
 
 def _eval_derivatives(
@@ -195,7 +307,10 @@ def _eval_derivatives(
     order: int = 2,
 ) -> np.ndarray:
     """
-    计算轨道在 rc 处的函数值和导数（使用有限差分）
+    计算轨道在 rc 处的函数值和导数（已废弃，使用 eval_derivatives_at 替代）
+
+    此函数假设等距网格，对非均匀网格会产生系统误差。
+    保留用于向后兼容，建议使用 eval_derivatives_at()。
 
     Parameters
     ----------
@@ -212,6 +327,10 @@ def _eval_derivatives(
     -------
     np.ndarray
         [u, u', u'', u''', u''''] (根据 order 返回相应长度)
+
+    See Also
+    --------
+    eval_derivatives_at : 推荐使用的样条法导数计算
     """
     # 使用中心差分公式（5 点模板）
     # 确保不越界
@@ -298,6 +417,9 @@ def _eval_tm_at_rc(rc: float, l: int, a: np.ndarray) -> np.ndarray:
     # p = a_0 + a_2 r^2 + a_4 r^4 + ...
     p = sum(a[i] * r**(2*i) for i in range(len(a)))
 
+    # 防止指数溢出（裁剪到安全范围）
+    p = np.clip(p, -700, 700)
+
     # p' = 2 a_2 r + 4 a_4 r^3 + ...
     p1 = sum(2*i * a[i] * r**(2*i-1) for i in range(1, len(a)))
 
@@ -373,6 +495,9 @@ def _compute_tm_norm(
     for i in range(len(a)):
         p += a[i] * r**(2*i)
 
+    # 防止指数溢出（裁剪到安全范围）
+    p = np.clip(p, -700, 700)
+
     u = r**(l+1) * np.exp(p)
     return np.sum(u**2 * w)
 
@@ -386,7 +511,7 @@ def _solve_tm_coefficients(
     continuity_orders: int,
     r_inner: np.ndarray,
     w_inner: np.ndarray,
-) -> np.ndarray:
+) -> tuple[np.ndarray, Dict]:
     """
     求解 TM 系数 a_{2i}
 
@@ -414,8 +539,10 @@ def _solve_tm_coefficients(
 
     Returns
     -------
-    np.ndarray
+    a_solution : np.ndarray
         系数 [a_0, a_2, a_4, ...]
+    solver_info : Dict
+        求解器信息 {'ier': int, 'nfev': int, 'mesg': str, 'fallback': bool}
     """
     # 定义残差函数
     def residuals(a):
@@ -442,17 +569,69 @@ def _solve_tm_coefficients(
     else:
         a_init[0] = 0.0
 
-    # 求解非线性方程组
-    try:
-        a_solution, info, ier, mesg = fsolve(residuals, a_init, full_output=True, xtol=1e-10)
-        if ier != 1:
-            # 如果不收敛，尝试更鲁棒的初值
-            a_init[0] *= 0.5
-            a_solution, info, ier, mesg = fsolve(residuals, a_init, full_output=True, xtol=1e-10)
-    except Exception as e:
-        raise RuntimeError(f"TM 系数求解失败：{e}")
+    # 求解非线性方程组（增强的fallback策略）
+    fallback_used = False
+    solver_info = {}
 
-    return a_solution
+    # 第一次尝试：标准初值
+    try:
+        a_solution, info, ier, mesg = fsolve(
+            residuals, a_init, full_output=True, xtol=1e-10, maxfev=2000
+        )
+        solver_info = {'ier': ier, 'nfev': info['nfev'], 'mesg': mesg, 'fallback': False}
+
+        if ier == 1:
+            return a_solution, solver_info
+    except Exception as e:
+        mesg = f"First attempt failed: {e}"
+
+    # Fallback 策略 1: 缩小 a_0
+    fallback_used = True
+    try:
+        a_init_fallback = a_init.copy()
+        a_init_fallback[0] *= 0.5
+        a_solution, info, ier, mesg = fsolve(
+            residuals, a_init_fallback, full_output=True, xtol=1e-10, maxfev=2000
+        )
+        solver_info = {'ier': ier, 'nfev': info['nfev'], 'mesg': mesg, 'fallback': True}
+
+        if ier == 1:
+            return a_solution, solver_info
+    except Exception as e:
+        mesg = f"Fallback 1 failed: {e}"
+
+    # Fallback 策略 2: 零初值
+    try:
+        a_init_zero = np.zeros(n_coeffs)
+        a_solution, info, ier, mesg = fsolve(
+            residuals, a_init_zero, full_output=True, xtol=1e-8, maxfev=3000
+        )
+        solver_info = {'ier': ier, 'nfev': info['nfev'], 'mesg': mesg, 'fallback': True}
+
+        if ier == 1:
+            return a_solution, solver_info
+    except Exception as e:
+        mesg = f"Fallback 2 failed: {e}"
+
+    # Fallback 策略 3: 随机扰动
+    try:
+        np.random.seed(42)
+        a_init_random = a_init + 0.1 * np.random.randn(n_coeffs)
+        a_solution, info, ier, mesg = fsolve(
+            residuals, a_init_random, full_output=True, xtol=1e-8, maxfev=3000
+        )
+        solver_info = {'ier': ier, 'nfev': info['nfev'], 'mesg': mesg, 'fallback': True}
+
+        if ier == 1:
+            return a_solution, solver_info
+    except Exception as e:
+        mesg = f"Fallback 3 failed: {e}"
+
+    # 所有尝试失败
+    raise RuntimeError(
+        f"TM 系数求解失败（所有fallback策略均失败）: {mesg}\n"
+        f"最后求解器状态: ier={solver_info.get('ier', -1)}, nfev={solver_info.get('nfev', 0)}"
+    )
 
 
 def _splice_orbital(
@@ -493,6 +672,9 @@ def _splice_orbital(
     p = np.zeros_like(r_inner)
     for i in range(len(a_coeff)):
         p += a_coeff[i] * r_inner**(2*i)
+
+    # 防止指数溢出（裁剪到安全范围）
+    p = np.clip(p, -700, 700)
 
     u_ps[:i_rc+1] = r_inner**(l+1) * np.exp(p)
 
