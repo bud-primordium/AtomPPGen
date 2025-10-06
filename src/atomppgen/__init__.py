@@ -17,9 +17,12 @@ __version__ = "0.1.0"
 
 # 导入主要模块
 from atomppgen.ae_atom import solve_ae_atom, AEAtomResult
+from atomppgen.tm import tm_pseudize, TMResult
 
 __all__ = [
     "__version__",
     "solve_ae_atom",
     "AEAtomResult",
+    "tm_pseudize",
+    "TMResult",
 ]
