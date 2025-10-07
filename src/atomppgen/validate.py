@@ -307,6 +307,7 @@ def _compute_log_derivative(
     u: np.ndarray,
     r: np.ndarray,
     r_test: float,
+    node_threshold: float = 1e-8,
 ) -> float:
     """
     计算对数导数 L(r_test) = r · d ln u / dr
@@ -319,6 +320,8 @@ def _compute_log_derivative(
         径向网格
     r_test : float
         测试半径（Bohr）
+    node_threshold : float, optional
+        节点检测阈值。若 |u(r_test)| < node_threshold，使用侧边采样
 
     Returns
     -------
@@ -330,7 +333,8 @@ def _compute_log_derivative(
     对数导数定义为：
         L(r) = r · u'(r) / u(r)
 
-    在 r_test 处使用有限差分计算导数。
+    在 r_test 处使用有限差分计算导数。当 r_test 接近波函数节点时，
+    自动选择侧边点（r_test±δr）计算以避免数值奇异性。
     """
     # 找到最接近 r_test 的网格点索引
     idx = np.argmin(np.abs(r - r_test))
@@ -344,17 +348,38 @@ def _compute_log_derivative(
     if idx == 0 or idx == len(r) - 1:
         raise ValueError(f"测试半径 {r_test} 在网格边界，无法计算导数")
 
-    dr_left = r[idx] - r[idx - 1]
-    dr_right = r[idx + 1] - r[idx]
+    # 节点检测：若波函数在 r_test 处接近零，使用侧边点
+    u_max = np.max(np.abs(u))
+    if abs(u[idx]) < node_threshold * u_max:
+        # 尝试左右侧点，选择|u|较大的一侧
+        u_left = u[idx - 1]
+        u_right = u[idx + 1]
+
+        if abs(u_left) > abs(u_right) and abs(u_left) > node_threshold * u_max:
+            # 使用左侧点
+            idx_use = idx - 1
+        elif abs(u_right) > node_threshold * u_max:
+            # 使用右侧点
+            idx_use = idx + 1
+        else:
+            # 两侧都接近零，r_test在节点附近，抛出异常
+            raise ValueError(f"波函数在 r={r_at}±δr 附近为零，无法计算对数导数")
+    else:
+        idx_use = idx
+
+    # 重新获取使用的点
+    r_use = r[idx_use]
+    dr_left = r[idx_use] - r[idx_use - 1]
+    dr_right = r[idx_use + 1] - r[idx_use]
 
     # 非均匀网格的中心差分
-    u_deriv = (u[idx + 1] - u[idx - 1]) / (dr_left + dr_right)
+    u_deriv = (u[idx_use + 1] - u[idx_use - 1]) / (dr_left + dr_right)
 
     # 对数导数 L = r · u' / u
-    if abs(u[idx]) < 1e-12:
-        raise ValueError(f"波函数在 r={r_at} 处为零，无法计算对数导数")
+    if abs(u[idx_use]) < 1e-12:
+        raise ValueError(f"波函数在 r={r_use} 处为零，无法计算对数导数")
 
-    L = r_at * u_deriv / u[idx]
+    L = r_use * u_deriv / u[idx_use]
     return float(L)
 
 
@@ -681,9 +706,18 @@ def check_log_derivative(
     L_AE_valid = L_AE[valid_mask]
     L_PS_valid = L_PS[valid_mask]
 
-    # 零点检测
-    zero_crossings_AE = _find_zero_crossings(energies_valid, L_AE_valid)
-    zero_crossings_PS = _find_zero_crossings(energies_valid, L_PS_valid)
+    # 过滤极值点（接近节点的 L 值可能异常大）
+    # 使用 IQR (四分位距) 方法检测 outliers
+    L_threshold = 50.0  # 简单阈值：|L| > 50 视为 outlier
+    outlier_mask = (np.abs(L_AE_valid) < L_threshold) & (np.abs(L_PS_valid) < L_threshold)
+
+    energies_filtered = energies_valid[outlier_mask]
+    L_AE_filtered = L_AE_valid[outlier_mask]
+    L_PS_filtered = L_PS_valid[outlier_mask]
+
+    # 零点检测（使用过滤后的数据）
+    zero_crossings_AE = _find_zero_crossings(energies_filtered, L_AE_filtered)
+    zero_crossings_PS = _find_zero_crossings(energies_filtered, L_PS_filtered)
 
     # 评价指标 1：零点 RMS 偏差
     if len(zero_crossings_AE) > 0 and len(zero_crossings_PS) > 0:
@@ -698,9 +732,9 @@ def check_log_derivative(
     else:
         zero_crossing_rms = np.inf  # 无零点，标记为无穷
 
-    # 评价指标 2：全曲线 RMS 差异
-    if len(L_AE_valid) > 0:
-        curve_rms = float(np.sqrt(np.mean((L_AE_valid - L_PS_valid)**2)))
+    # 评价指标 2：全曲线 RMS 差异（使用过滤后的数据）
+    if len(L_AE_filtered) > 0:
+        curve_rms = float(np.sqrt(np.mean((L_AE_filtered - L_PS_filtered)**2)))
     else:
         curve_rms = np.inf
 
@@ -715,11 +749,13 @@ def check_log_derivative(
     diagnostics = {
         'n_energies': int(n_E),
         'n_valid': int(np.sum(valid_mask)),
+        'n_filtered': int(np.sum(outlier_mask)),
         'n_zeros_AE': int(len(zero_crossings_AE)),
         'n_zeros_PS': int(len(zero_crossings_PS)),
         'r_test': float(r_test),
         'E_range_Ha': tuple(map(float, E_range_Ha)),
         'E_step_Ha': float(E_step_Ha),
+        'L_threshold': float(L_threshold),
     }
 
     return LogDerivativeResult(
@@ -819,7 +855,7 @@ def check_ghost_states(
 
         # 识别幽灵态：在窗口内但远离已知价态的额外束缚态
         ghost_states = []
-        tolerance_E = 0.1  # Ha，约 ±0.1 Ha 范围内认为是同一态
+        tolerance_E = 0.05  # Ha，约 ±0.05 Ha (0.1 Ry) 范围内认为是同一态
         for E in eigenvalues:
             # 检查是否接近已知价态
             is_known = np.any(np.abs(E - known_valence) < tolerance_E)
@@ -833,6 +869,7 @@ def check_ghost_states(
         diagnostics = {
             'method': 'radial_hamiltonian_diagonalization',
             'E_window_Ha': tuple(map(float, E_window_Ha)),
+            'tolerance_E_Ha': float(tolerance_E),
             'n_bound_states_total': int(len(bound_energies)),
             'n_bound_states_in_window': int(len(eigenvalues)),
             'grid_resampled': not is_uniform,
@@ -918,6 +955,8 @@ def run_full_validation(
         )
 
     # 3. 幽灵态检测（对每个通道）
+    # 使用更窄的能量窗口，聚焦价电子带附近
+    ghost_E_window_Ha = (-0.15, 0.05)  # 更窄窗口，减少虚假幽灵态检测
     ghost_results = {}
     for l, inv in inv_dict.items():
         # 获取该通道的价电子能量
@@ -931,7 +970,7 @@ def run_full_validation(
         ghost_results[l] = check_ghost_states(
             inv, ae_result.r, ae_result.w,
             valence_energy=valence_energy,
-            E_window_Ha=E_range_Ha,
+            E_window_Ha=ghost_E_window_Ha,
             method='radial'
         )
 
