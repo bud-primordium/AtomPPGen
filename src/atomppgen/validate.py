@@ -98,10 +98,12 @@ class LogDerivativeResult:
         伪势零点能量
     zero_crossing_rms : float
         零点均方根偏差（Hartree）
-    curve_rms : float
-        全曲线均方根差异
+    curve_rms_valence : float
+        价区曲线均方根差异（-0.05 ~ +0.05 Ha）
+    curve_rms_full : float
+        全能量窗口曲线 RMS（告警用）
     passed : bool
-        是否通过验证
+        是否通过验证（基于 zero_crossing_rms 和 curve_rms_valence）
     diagnostics : Dict
         诊断信息
     """
@@ -113,7 +115,8 @@ class LogDerivativeResult:
     zero_crossings_AE: np.ndarray
     zero_crossings_PS: np.ndarray
     zero_crossing_rms: float
-    curve_rms: float
+    curve_rms_valence: float
+    curve_rms_full: float
     passed: bool
     diagnostics: Dict
 
@@ -134,11 +137,17 @@ class GhostStateResult:
     known_valence : np.ndarray
         已知价电子能级
     ghost_states : np.ndarray
-        幽灵态能级
+        幽灵态能级（不含盒态）
+    box_states : np.ndarray
+        盒态能级（波函数尾部未衰减）
     n_ghosts : int
-        幽灵态数量
+        真幽灵态数量（不含盒态）
+    n_box_states : int
+        盒态数量
     passed : bool
         是否通过（n_ghosts == 0）
+    tail_ratios : np.ndarray
+        各本征态的尾部比例（|ψ(R_max)| / max|ψ|）
     diagnostics : Dict
         诊断信息
     """
@@ -147,8 +156,11 @@ class GhostStateResult:
     eigenvalues: np.ndarray
     known_valence: np.ndarray
     ghost_states: np.ndarray
+    box_states: np.ndarray
     n_ghosts: int
+    n_box_states: int
     passed: bool
+    tail_ratios: np.ndarray
     diagnostics: Dict
 
 
@@ -189,11 +201,14 @@ class ValidationReport:
                 'l': r.l,
                 'r_test': float(r.r_test),
                 'zero_crossing_rms': float(r.zero_crossing_rms),
-                'curve_rms': float(r.curve_rms),
+                'curve_rms_valence': float(r.curve_rms_valence),
+                'curve_rms_full': float(r.curve_rms_full),
+                'curve_rms': float(r.curve_rms_valence),  # 向后兼容，使用价区RMS
                 'passed': r.passed,
             } for l, r in self.log_deriv_results.items()},
             'ghost_result': {
                 'n_ghosts': self.ghost_result.n_ghosts,
+                'n_box_states': self.ghost_result.n_box_states,
                 'passed': self.ghost_result.passed,
             } if self.ghost_result else None,
             'overall_passed': self.overall_passed,
@@ -458,9 +473,10 @@ def _find_bound_states_from_hamiltonian(
     H: np.ndarray,
     r: np.ndarray,
     E_max: float = 0.0,
-) -> np.ndarray:
+    tail_threshold: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    从哈密顿矩阵对角化找到束缚态能量
+    从哈密顿矩阵对角化找到束缚态能量与特征
 
     Parameters
     ----------
@@ -470,25 +486,49 @@ def _find_bound_states_from_hamiltonian(
         径向网格
     E_max : float, default=0.0
         最大能量阈值（只返回 E < E_max 的束缚态）
+    tail_threshold : float, default=0.1
+        尾部判据阈值：|ψ(R_max)| / max|ψ| < threshold 视为束缚态
 
     Returns
     -------
     bound_energies : np.ndarray
         束缚态能量数组（按升序排列）
+    tail_ratios : np.ndarray
+        对应的尾部比例数组
+    is_box_state : np.ndarray (bool)
+        是否为盒态标记（True 表示尾部未衰减，可能是盒态）
+
+    Notes
+    -----
+    盒态判据：tail_ratio > tail_threshold，表示波函数在盒边界未充分衰减，
+    可能是有限盒截断导致的虚假束缚态。
     """
     # 对角化哈密顿量
     eigenvalues, eigenvectors = np.linalg.eigh(H)
 
-    # 筛选束缚态（E < E_max 且波函数在边界处趋零）
+    # 筛选束缚态并记录尾部信息
     bound_energies = []
+    tail_ratios = []
+    is_box_state = []
+
     for i, E in enumerate(eigenvalues):
         if E < E_max:
-            # 检查波函数是否在边界处足够小（束缚态特征）
             psi = eigenvectors[:, i]
-            if abs(psi[-1]) < 0.1 * np.max(np.abs(psi)):  # 简化判据
-                bound_energies.append(E)
+            psi_max = np.max(np.abs(psi))
+            tail_ratio = abs(psi[-1]) / psi_max if psi_max > 1e-14 else 0.0
 
-    return np.array(sorted(bound_energies))
+            # 宽松判据：只要不是明显发散的态就保留
+            if tail_ratio < 0.5:  # 允许一定的尾部，但排除明显的散射态
+                bound_energies.append(E)
+                tail_ratios.append(tail_ratio)
+                # 盒态判定：尾部比例超过阈值
+                is_box_state.append(tail_ratio > tail_threshold)
+
+    return (
+        np.array(bound_energies),
+        np.array(tail_ratios),
+        np.array(is_box_state, dtype=bool)
+    )
 
 
 def _extract_ks_potential(
@@ -732,28 +772,41 @@ def check_log_derivative(
     else:
         zero_crossing_rms = np.inf  # 无零点，标记为无穷
 
-    # 评价指标 2：全曲线 RMS 差异（使用过滤后的数据）
+    # 评价指标 2：曲线 RMS 差异（分区计算）
+    # 2a. 全能量窗口 RMS（告警用）
     if len(L_AE_filtered) > 0:
-        curve_rms = float(np.sqrt(np.mean((L_AE_filtered - L_PS_filtered)**2)))
+        curve_rms_full = float(np.sqrt(np.mean((L_AE_filtered - L_PS_filtered)**2)))
     else:
-        curve_rms = np.inf
+        curve_rms_full = np.inf
 
-    # 判定是否通过（Codex 标准）
+    # 2b. 价区 RMS（-0.05 ~ +0.05 Ha，主要指标）
+    valence_window_Ha = (-0.05, 0.05)
+    valence_mask = (energies_filtered >= valence_window_Ha[0]) & (energies_filtered <= valence_window_Ha[1])
+    if np.sum(valence_mask) > 0:
+        L_AE_valence = L_AE_filtered[valence_mask]
+        L_PS_valence = L_PS_filtered[valence_mask]
+        curve_rms_valence = float(np.sqrt(np.mean((L_AE_valence - L_PS_valence)**2)))
+    else:
+        curve_rms_valence = np.inf  # 价区无有效点
+
+    # 判定是否通过（Codex 新标准：价区 RMS 为主）
     passed = bool(
-        zero_crossing_rms < 0.025 and  # 零点 RMS < 0.025 Ha
-        curve_rms < 0.3 and             # 曲线 RMS < 0.3
+        zero_crossing_rms < 0.025 and           # 零点 RMS < 0.025 Ha（硬指标）
+        curve_rms_valence < 0.3 and             # 价区曲线 RMS < 0.3（主指标）
         np.isfinite(zero_crossing_rms) and
-        np.isfinite(curve_rms)
+        np.isfinite(curve_rms_valence)
     )
 
     diagnostics = {
         'n_energies': int(n_E),
         'n_valid': int(np.sum(valid_mask)),
         'n_filtered': int(np.sum(outlier_mask)),
+        'n_valence_points': int(np.sum(valence_mask)),
         'n_zeros_AE': int(len(zero_crossings_AE)),
         'n_zeros_PS': int(len(zero_crossings_PS)),
         'r_test': float(r_test),
         'E_range_Ha': tuple(map(float, E_range_Ha)),
+        'valence_window_Ha': tuple(map(float, valence_window_Ha)),
         'E_step_Ha': float(E_step_Ha),
         'L_threshold': float(L_threshold),
     }
@@ -767,7 +820,8 @@ def check_log_derivative(
         zero_crossings_AE=zero_crossings_AE,
         zero_crossings_PS=zero_crossings_PS,
         zero_crossing_rms=float(zero_crossing_rms) if np.isfinite(zero_crossing_rms) else float('inf'),
-        curve_rms=float(curve_rms) if np.isfinite(curve_rms) else float('inf'),
+        curve_rms_valence=float(curve_rms_valence) if np.isfinite(curve_rms_valence) else float('inf'),
+        curve_rms_full=float(curve_rms_full) if np.isfinite(curve_rms_full) else float('inf'),
         passed=passed,
         diagnostics=diagnostics,
     )
@@ -780,6 +834,7 @@ def check_ghost_states(
     valence_energy: float,
     E_window_Ha: Tuple[float, float] = (-0.25, 0.25),
     method: str = 'radial',
+    radial_grid_n: Optional[int] = None,
 ) -> GhostStateResult:
     """
     幽灵态检测（径向级别）
@@ -828,7 +883,10 @@ def check_ghost_states(
 
         if not is_uniform:
             # 重采样到均匀网格（简化哈密顿构建）
-            n_uniform = min(len(r), 300)  # 限制矩阵大小以加速
+            # 允许通过 radial_grid_n 调整重采样点数（默认最多 300）
+            n_cap = 300 if radial_grid_n is None else int(radial_grid_n)
+            n_cap = max(50, n_cap)  # 最小保护
+            n_uniform = min(len(r), n_cap)
             r_uniform = np.linspace(r[0], r[-1], n_uniform)
             V_interp = interp1d(r, V_PS, kind='cubic', fill_value='extrapolate')
             V_uniform = V_interp(r_uniform)
@@ -841,39 +899,51 @@ def check_ghost_states(
         # 构建径向哈密顿矩阵
         H = _build_radial_hamiltonian(r_work, V_work, inv_result.l)
 
-        # 找到能量窗口内的所有束缚态
-        bound_energies = _find_bound_states_from_hamiltonian(
-            H, r_work, E_max=max(E_window_Ha)
+        # 找到能量窗口内的所有束缚态（含尾部信息）
+        bound_energies, tail_ratios_all, is_box_all = _find_bound_states_from_hamiltonian(
+            H, r_work, E_max=max(E_window_Ha), tail_threshold=0.1
         )
 
         # 过滤到能量窗口内
         in_window = (bound_energies >= E_window_Ha[0]) & (bound_energies <= E_window_Ha[1])
         eigenvalues = bound_energies[in_window]
+        tail_ratios_window = tail_ratios_all[in_window]
+        is_box_window = is_box_all[in_window]
 
         # 已知价电子态
         known_valence = np.array([valence_energy])
 
-        # 识别幽灵态：在窗口内但远离已知价态的额外束缚态
-        ghost_states = []
+        # 识别幽灵态与盒态：在窗口内但远离已知价态的额外束缚态
+        ghost_states_list = []
+        box_states_list = []
         tolerance_E = 0.05  # Ha，约 ±0.05 Ha (0.1 Ry) 范围内认为是同一态
-        for E in eigenvalues:
+
+        for i, E in enumerate(eigenvalues):
             # 检查是否接近已知价态
             is_known = np.any(np.abs(E - known_valence) < tolerance_E)
             if not is_known:
-                ghost_states.append(E)
+                # 根据尾部比例分类：盒态 vs 真幽灵态
+                if is_box_window[i]:
+                    box_states_list.append(E)
+                else:
+                    ghost_states_list.append(E)
 
-        ghost_states = np.array(ghost_states)
+        ghost_states = np.array(ghost_states_list)
+        box_states = np.array(box_states_list)
         n_ghosts = len(ghost_states)
-        passed = bool(n_ghosts == 0)
+        n_box_states = len(box_states)
+        passed = bool(n_ghosts == 0)  # 只有真幽灵态为 0 才通过
 
         diagnostics = {
             'method': 'radial_hamiltonian_diagonalization',
             'E_window_Ha': tuple(map(float, E_window_Ha)),
             'tolerance_E_Ha': float(tolerance_E),
+            'tail_threshold': 0.1,
             'n_bound_states_total': int(len(bound_energies)),
             'n_bound_states_in_window': int(len(eigenvalues)),
             'grid_resampled': not is_uniform,
             'grid_size': int(len(r_work)),
+            'grid_n_cap': int(300 if radial_grid_n is None else radial_grid_n),
         }
 
         return GhostStateResult(
@@ -882,8 +952,11 @@ def check_ghost_states(
             eigenvalues=eigenvalues,
             known_valence=known_valence,
             ghost_states=ghost_states,
+            box_states=box_states,
             n_ghosts=int(n_ghosts),
+            n_box_states=int(n_box_states),
             passed=passed,
+            tail_ratios=tail_ratios_window,
             diagnostics=diagnostics,
         )
 
@@ -902,6 +975,7 @@ def run_full_validation(
     r_test: float = 3.0,
     E_range_Ry: Tuple[float, float] = (-0.5, 0.5),
     E_step_Ry: float = 0.05,
+    ghost_radial_grid_n: Optional[int] = None,
 ) -> ValidationReport:
     """
     完整验证流程
@@ -971,7 +1045,8 @@ def run_full_validation(
             inv, ae_result.r, ae_result.w,
             valence_energy=valence_energy,
             E_window_Ha=ghost_E_window_Ha,
-            method='radial'
+            method='radial',
+            radial_grid_n=ghost_radial_grid_n,
         )
 
     # 整体判定

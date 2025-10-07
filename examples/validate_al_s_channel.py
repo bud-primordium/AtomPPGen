@@ -11,6 +11,7 @@ import numpy as np
 
 from atomppgen import solve_ae_atom, tm_pseudize, invert_semilocal_potential
 from atomppgen.validate import run_full_validation
+import argparse
 
 # 可选依赖：matplotlib
 try:
@@ -21,6 +22,10 @@ except ImportError:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Al s 通道赝势验证示例")
+    parser.add_argument("--ghost-grid-n", type=int, default=None,
+                        help="幽灵态径向重采样矩阵尺寸上限（默认300）")
+    args = parser.parse_args()
     """运行 Al s 通道完整验证"""
 
     print("=" * 60)
@@ -68,7 +73,8 @@ def main():
         ae, tm_dict, inv_dict,
         r_test=3.0,
         E_range_Ry=(-0.5, 0.5),  # 完整能量窗口
-        E_step_Ry=0.05
+        E_step_Ry=0.05,
+        ghost_radial_grid_n=args.ghost_grid_n,
     )
 
     # 5. 显示结果
@@ -98,6 +104,10 @@ def main():
         print(f"  窗口内束缚态: {ghost.diagnostics['n_bound_states_in_window']}")
         print(f"  幽灵态数量: {ghost.n_ghosts}")
         print(f"  通过: {'✓' if ghost.passed else '✗'}")
+        if ghost.diagnostics.get('grid_resampled', False):
+            print(f"  径向网格重采样: ✓, 尺寸={ghost.diagnostics['grid_size']} (上限={ghost.diagnostics.get('grid_n_cap', '300')})")
+        else:
+            print(f"  径向网格重采样: ✗ (使用原始均匀网格)")
 
     # 整体判定
     print(f"\n{'=' * 60}")
