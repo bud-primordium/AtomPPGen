@@ -13,6 +13,7 @@ API 参考
    tm
    invert
    kb
+   validate
 
 模块概览
 --------
@@ -25,3 +26,4 @@ API 参考
    atomppgen.tm
    atomppgen.invert
    atomppgen.kb
+   atomppgen.validate

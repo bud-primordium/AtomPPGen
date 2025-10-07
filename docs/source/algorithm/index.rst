@@ -8,6 +8,7 @@
 
    tm_method
    potential_inversion
+   validation_methods
 
 概述
 ----
