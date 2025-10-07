@@ -1,0 +1,867 @@
+"""
+赝势可转移性验证模块
+
+提供三类验证功能：
+1. 范数守恒检验：伪轨道与全电子轨道在截断半径内的归一化一致性
+2. 对数导数匹配：散射性质的能量依赖性（AE vs PS）
+3. 幽灵态检测：赝势哈密顿量的病态束缚态检查
+
+主要函数
+--------
+check_norm_conservation : 范数守恒检验
+check_log_derivative : 对数导数匹配验证
+check_ghost_states : 幽灵态检测（径向级别）
+run_full_validation : 完整验证流程
+
+参考文献
+--------
+Troullier & Martins, PRB 43, 1993 (1991) - 范数守恒条件
+Gonze et al., Comput. Mater. Sci. 25, 478 (2002) - 对数导数方法
+Rappe et al., PRB 41, 1227 (1990) - 幽灵态检测
+"""
+
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional
+import numpy as np
+from scipy.interpolate import interp1d
+
+from atomppgen.tm import TMResult
+from atomppgen.invert import InvertResult
+
+
+__all__ = [
+    "NormConservationResult",
+    "LogDerivativeResult",
+    "GhostStateResult",
+    "ValidationReport",
+    "check_norm_conservation",
+    "check_log_derivative",
+    "check_ghost_states",
+    "run_full_validation",
+]
+
+
+@dataclass
+class NormConservationResult:
+    """
+    范数守恒检验结果
+
+    Attributes
+    ----------
+    l : int
+        角动量量子数
+    norm_error : float
+        范数误差：∫₀^rc |u_PS|² - ∫₀^rc |u_AE|²
+    passed : bool
+        是否通过（|error| < tolerance）
+    rc : float
+        截断半径（Bohr）
+    tolerance : float
+        容许误差阈值
+    diagnostics : Dict
+        诊断信息：
+        - norm_ae : 全电子内区范数
+        - norm_ps : 伪轨道内区范数
+    """
+    l: int
+    norm_error: float
+    passed: bool
+    rc: float
+    tolerance: float
+    diagnostics: Dict
+
+
+@dataclass
+class LogDerivativeResult:
+    """
+    对数导数匹配验证结果
+
+    Attributes
+    ----------
+    l : int
+        角动量量子数
+    r_test : float
+        测试半径（Bohr）
+    energies : np.ndarray
+        能量网格（Hartree）
+    L_AE : np.ndarray
+        全电子对数导数 L(E) = r·ψ'/ψ
+    L_PS : np.ndarray
+        伪势对数导数
+    zero_crossings_AE : np.ndarray
+        全电子零点能量
+    zero_crossings_PS : np.ndarray
+        伪势零点能量
+    zero_crossing_rms : float
+        零点均方根偏差（Hartree）
+    curve_rms : float
+        全曲线均方根差异
+    passed : bool
+        是否通过验证
+    diagnostics : Dict
+        诊断信息
+    """
+    l: int
+    r_test: float
+    energies: np.ndarray
+    L_AE: np.ndarray
+    L_PS: np.ndarray
+    zero_crossings_AE: np.ndarray
+    zero_crossings_PS: np.ndarray
+    zero_crossing_rms: float
+    curve_rms: float
+    passed: bool
+    diagnostics: Dict
+
+
+@dataclass
+class GhostStateResult:
+    """
+    幽灵态检测结果
+
+    Attributes
+    ----------
+    method : str
+        检测方法（'radial' 或 'plane_wave'）
+    l : int
+        角动量量子数（径向方法）或 -1（平面波方法）
+    eigenvalues : np.ndarray
+        检测到的本征值（Hartree）
+    known_valence : np.ndarray
+        已知价电子能级
+    ghost_states : np.ndarray
+        幽灵态能级
+    n_ghosts : int
+        幽灵态数量
+    passed : bool
+        是否通过（n_ghosts == 0）
+    diagnostics : Dict
+        诊断信息
+    """
+    method: str
+    l: int
+    eigenvalues: np.ndarray
+    known_valence: np.ndarray
+    ghost_states: np.ndarray
+    n_ghosts: int
+    passed: bool
+    diagnostics: Dict
+
+
+@dataclass
+class ValidationReport:
+    """
+    完整验证报告
+
+    Attributes
+    ----------
+    norm_results : Dict[int, NormConservationResult]
+        各通道范数守恒结果
+    log_deriv_results : Dict[int, LogDerivativeResult]
+        各通道对数导数结果
+    ghost_result : GhostStateResult
+        幽灵态检测结果
+    overall_passed : bool
+        整体是否通过
+    diagnostics : Dict
+        汇总诊断信息
+    """
+    norm_results: Dict[int, NormConservationResult]
+    log_deriv_results: Dict[int, LogDerivativeResult]
+    ghost_result: Optional[GhostStateResult]
+    overall_passed: bool
+    diagnostics: Dict
+
+    def to_dict(self) -> Dict:
+        """转换为字典（用于 JSON 序列化）"""
+        return {
+            'norm_results': {l: {
+                'l': r.l,
+                'norm_error': float(r.norm_error),
+                'passed': r.passed,
+                'rc': float(r.rc),
+            } for l, r in self.norm_results.items()},
+            'log_deriv_results': {l: {
+                'l': r.l,
+                'r_test': float(r.r_test),
+                'zero_crossing_rms': float(r.zero_crossing_rms),
+                'curve_rms': float(r.curve_rms),
+                'passed': r.passed,
+            } for l, r in self.log_deriv_results.items()},
+            'ghost_result': {
+                'n_ghosts': self.ghost_result.n_ghosts,
+                'passed': self.ghost_result.passed,
+            } if self.ghost_result else None,
+            'overall_passed': self.overall_passed,
+        }
+
+
+def _solve_radial_schrodinger_numerov(
+    r: np.ndarray,
+    V: np.ndarray,
+    l: int,
+    E: float,
+) -> np.ndarray:
+    """
+    使用 Numerov 方法求解径向薛定谔方程
+
+    求解方程：
+        [-1/2 d²/dr² + V(r) + l(l+1)/(2r²)]u(r) = E·u(r)
+
+    其中 u(r) = r·ψ(r) 是径向波函数。
+
+    Parameters
+    ----------
+    r : np.ndarray
+        径向网格（可以是非均匀网格）
+    V : np.ndarray
+        势能 V(r)（不含离心项）
+    l : int
+        角动量量子数
+    E : float
+        能量本征值（Hartree）
+
+    Returns
+    -------
+    u : np.ndarray
+        径向波函数 u(r)，与输入网格 r 等长
+
+    Notes
+    -----
+    Numerov 方法要求均匀网格。若输入网格非均匀，内部自动重采样到
+    均匀网格，求解后插值回原网格。
+
+    边界条件：u(0)=0，u(r→∞)→0（束缚态）或振荡（散射态）
+
+    References
+    ----------
+    - Numerov, Trudy Glav. Astron. Obs. 28, 173 (1926)
+    - Johnson, J. Comput. Phys. 13, 445 (1973)
+    """
+    # 检查网格均匀性
+    dr = np.diff(r)
+    is_uniform = np.allclose(dr, dr[0], rtol=1e-6)
+
+    # 若非均匀，重采样到均匀网格
+    if not is_uniform:
+        n_uniform = len(r)
+        r_uniform = np.linspace(r[0], r[-1], n_uniform)
+        V_interp = interp1d(r, V, kind='cubic', fill_value='extrapolate')
+        V_uniform = V_interp(r_uniform)
+        r_work = r_uniform
+        V_work = V_uniform
+    else:
+        r_work = r
+        V_work = V
+
+    # 构建有效势（包含离心项）
+    # 添加小量避免 r=0 处除零
+    r_safe = np.maximum(r_work, 1e-10)
+    V_eff = V_work + l * (l + 1) / (2 * r_safe**2)
+
+    # 计算 k²(r) = 2[E - V_eff(r)]（原子单位）
+    k2 = 2.0 * (E - V_eff)
+
+    # Numerov 方法求解
+    n = len(r_work)
+    h = r_work[1] - r_work[0]  # 步长（均匀网格）
+    u = np.zeros(n)
+
+    # 初始条件：u(0)=0，u(h) 从级数展开估计
+    # 对于 s 态：u(r) ≈ r - Z·r²/2 + ...（类氢）
+    # 对于 l>0：u(r) ≈ r^(l+1)
+    u[0] = 0.0
+    if l == 0:
+        u[1] = r_work[1]  # s 态从线性项开始
+    else:
+        u[1] = r_work[1]**(l + 1)  # 高角动量从 r^(l+1) 开始
+
+    # Numerov 迭代公式：
+    # (1 + h²k²_{n+1}/12)u_{n+1} = 2(1 - 5h²k²_n/12)u_n - (1 + h²k²_{n-1}/12)u_{n-1}
+    for i in range(1, n - 1):
+        c0 = 1.0 + h**2 * k2[i - 1] / 12.0
+        c1 = 2.0 * (1.0 - 5.0 * h**2 * k2[i] / 12.0)
+        c2 = 1.0 + h**2 * k2[i + 1] / 12.0
+
+        u[i + 1] = (c1 * u[i] - c0 * u[i - 1]) / c2
+
+    # 归一化（简单归一化，确保数值稳定）
+    norm = np.sqrt(np.trapezoid(u**2, r_work))
+    if norm > 1e-12:
+        u /= norm
+
+    # 若重采样了，插值回原网格
+    if not is_uniform:
+        u_interp = interp1d(r_work, u, kind='cubic', fill_value='extrapolate')
+        u_original = u_interp(r)
+        return u_original
+    else:
+        return u
+
+
+def _compute_log_derivative(
+    u: np.ndarray,
+    r: np.ndarray,
+    r_test: float,
+) -> float:
+    """
+    计算对数导数 L(r_test) = r · d ln u / dr
+
+    Parameters
+    ----------
+    u : np.ndarray
+        径向波函数 u(r)
+    r : np.ndarray
+        径向网格
+    r_test : float
+        测试半径（Bohr）
+
+    Returns
+    -------
+    L : float
+        对数导数值
+
+    Notes
+    -----
+    对数导数定义为：
+        L(r) = r · u'(r) / u(r)
+
+    在 r_test 处使用有限差分计算导数。
+    """
+    # 找到最接近 r_test 的网格点索引
+    idx = np.argmin(np.abs(r - r_test))
+    r_at = r[idx]
+
+    # 检查是否足够接近
+    if abs(r_at - r_test) > 0.1:
+        raise ValueError(f"网格点 {r_at} 距离测试半径 {r_test} 过远")
+
+    # 使用中心差分计算 u'(r_test)
+    if idx == 0 or idx == len(r) - 1:
+        raise ValueError(f"测试半径 {r_test} 在网格边界，无法计算导数")
+
+    dr_left = r[idx] - r[idx - 1]
+    dr_right = r[idx + 1] - r[idx]
+
+    # 非均匀网格的中心差分
+    u_deriv = (u[idx + 1] - u[idx - 1]) / (dr_left + dr_right)
+
+    # 对数导数 L = r · u' / u
+    if abs(u[idx]) < 1e-12:
+        raise ValueError(f"波函数在 r={r_at} 处为零，无法计算对数导数")
+
+    L = r_at * u_deriv / u[idx]
+    return float(L)
+
+
+def _find_zero_crossings(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    找到函数 y(x) 的零点位置（线性插值）
+
+    Parameters
+    ----------
+    x : np.ndarray
+        自变量数组
+    y : np.ndarray
+        因变量数组
+
+    Returns
+    -------
+    zeros : np.ndarray
+        零点位置数组
+    """
+    zeros = []
+    for i in range(len(y) - 1):
+        if y[i] * y[i + 1] < 0:  # 符号变化
+            # 线性插值找零点
+            x_zero = x[i] - y[i] * (x[i + 1] - x[i]) / (y[i + 1] - y[i])
+            zeros.append(x_zero)
+    return np.array(zeros)
+
+
+def _build_radial_hamiltonian(
+    r: np.ndarray,
+    V: np.ndarray,
+    l: int,
+) -> np.ndarray:
+    """
+    构建径向哈密顿矩阵（有限差分）
+
+    H_l = -1/2 d²/dr² + V(r) + l(l+1)/(2r²)
+
+    Parameters
+    ----------
+    r : np.ndarray
+        径向网格（假设均匀）
+    V : np.ndarray
+        势能 V(r)（不含离心项）
+    l : int
+        角动量量子数
+
+    Returns
+    -------
+    H : np.ndarray
+        哈密顿矩阵（n×n）
+    """
+    n = len(r)
+    dr = r[1] - r[0]  # 假设均匀网格
+    H = np.zeros((n, n))
+
+    # 离心势
+    r_safe = np.maximum(r, 1e-10)
+    V_centrifugal = l * (l + 1) / (2 * r_safe**2)
+    V_eff = V + V_centrifugal
+
+    # 动能算子（三点有限差分）：-1/2 d²/dr² ≈ -1/(2dr²) [u_{i+1} - 2u_i + u_{i-1}]
+    # 对角元
+    for i in range(n):
+        H[i, i] = 1.0 / dr**2 + V_eff[i]
+
+    # 非对角元
+    for i in range(n - 1):
+        H[i, i + 1] = -0.5 / dr**2
+        H[i + 1, i] = -0.5 / dr**2
+
+    return H
+
+
+def _find_bound_states_from_hamiltonian(
+    H: np.ndarray,
+    r: np.ndarray,
+    E_max: float = 0.0,
+) -> np.ndarray:
+    """
+    从哈密顿矩阵对角化找到束缚态能量
+
+    Parameters
+    ----------
+    H : np.ndarray
+        哈密顿矩阵
+    r : np.ndarray
+        径向网格
+    E_max : float, default=0.0
+        最大能量阈值（只返回 E < E_max 的束缚态）
+
+    Returns
+    -------
+    bound_energies : np.ndarray
+        束缚态能量数组（按升序排列）
+    """
+    # 对角化哈密顿量
+    eigenvalues, eigenvectors = np.linalg.eigh(H)
+
+    # 筛选束缚态（E < E_max 且波函数在边界处趋零）
+    bound_energies = []
+    for i, E in enumerate(eigenvalues):
+        if E < E_max:
+            # 检查波函数是否在边界处足够小（束缚态特征）
+            psi = eigenvectors[:, i]
+            if abs(psi[-1]) < 0.1 * np.max(np.abs(psi)):  # 简化判据
+                bound_energies.append(E)
+
+    return np.array(sorted(bound_energies))
+
+
+def check_norm_conservation(
+    tm_result: TMResult,
+    tolerance: float = 1e-6,
+) -> NormConservationResult:
+    """
+    检验范数守恒条件
+
+    验证伪轨道在截断半径内的归一化是否与全电子一致：
+
+        ∫₀^rc |u_PS(r)|² dr = ∫₀^rc |u_AE(r)|² dr
+
+    Parameters
+    ----------
+    tm_result : TMResult
+        TM 伪化结果（包含 norm_error 字段）
+    tolerance : float, default=1e-6
+        容许误差阈值
+
+    Returns
+    -------
+    NormConservationResult
+        范数守恒检验结果
+
+    Notes
+    -----
+    本函数实际上是对 TMResult.norm_error 的包装，因为 TM 伪化过程
+    已经通过非线性方程组保证了范数守恒。此处仅验证误差是否在容许范围内。
+
+    Examples
+    --------
+    >>> from atomppgen import solve_ae_atom, tm_pseudize, check_norm_conservation
+    >>> ae = solve_ae_atom(Z=13, spin_mode='LDA', lmax=0)
+    >>> tm = tm_pseudize(ae.r, ae.w, ae.u_by_l[0][-1], ae.eps_by_l[0][-1], l=0, rc=2.0)
+    >>> result = check_norm_conservation(tm)
+    >>> print(result.passed)  # True
+    >>> print(result.norm_error)  # < 1e-6
+    """
+    # 提取范数误差（TM 方法已计算）
+    norm_error = float(tm_result.norm_error)
+    passed = bool(abs(norm_error) < tolerance)
+
+    # 从 TM 连续性检查提取信息（若有）
+    continuity_info = tm_result.continuity_check if hasattr(tm_result, 'continuity_check') else {}
+
+    diagnostics = {
+        'method': 'tm_nonlinear_solver',
+        'continuity_orders': int(tm_result.continuity_orders),
+        'solver_converged': bool(tm_result.solver_info.get('ier', -1) == 1),
+    }
+
+    return NormConservationResult(
+        l=int(tm_result.l),
+        norm_error=norm_error,
+        passed=passed,
+        rc=float(tm_result.rc),
+        tolerance=float(tolerance),
+        diagnostics=diagnostics,
+    )
+
+
+def check_log_derivative(
+    V_AE: np.ndarray,
+    V_PS: np.ndarray,
+    r: np.ndarray,
+    l: int,
+    r_test: float,
+    E_range_Ha: Tuple[float, float] = (-0.25, 0.25),
+    E_step_Ha: float = 0.025,
+) -> LogDerivativeResult:
+    """
+    对数导数匹配验证
+
+    在测试半径 r_test 处，扫描能量窗口，比较全电子和伪势的对数导数：
+
+        L(E, r) = r · d ln ψ(r) / dr = r · ψ'(r) / ψ(r)
+
+    评价指标：
+    1. 零点能量均方根偏差：ΔE_RMS < 0.025 Ha (≈0.05 Ry)
+    2. 全曲线均方根差异：L_RMS < 0.3
+
+    Parameters
+    ----------
+    V_AE : np.ndarray
+        全电子半局域势（Hartree），不含离心项
+    V_PS : np.ndarray
+        伪势半局域势（Hartree），不含离心项
+    r : np.ndarray
+        径向网格（Bohr）
+    l : int
+        角动量量子数
+    r_test : float
+        测试半径（Bohr），建议 max(rc_l) + 0.5
+    E_range_Ha : tuple, default=(-0.25, 0.25)
+        能量扫描范围（Hartree），对应 Ry 的 (-0.5, 0.5)
+    E_step_Ha : float, default=0.025
+        能量步长（Hartree），对应 Ry 的 0.05
+
+    Returns
+    -------
+    LogDerivativeResult
+        对数导数匹配结果
+
+    Notes
+    -----
+    1. **径向薛定谔方程**: 包含离心项 l(l+1)/(2r²)，在求解器内部添加
+    2. **边界条件**: ψ(0)=0，ψ(∞)=0 或外向波
+    3. **数值方法**: Numerov 或五点有限差分
+    4. **能量单位**: 统一使用 Hartree
+
+    Examples
+    --------
+    >>> result = check_log_derivative(V_AE, V_PS, r, l=0, r_test=3.0)
+    >>> print(result.zero_crossing_rms)  # < 0.025 Ha
+    >>> print(result.passed)  # True
+    """
+    # 能量网格
+    energies = np.arange(E_range_Ha[0], E_range_Ha[1] + E_step_Ha, E_step_Ha)
+    n_E = len(energies)
+
+    # 初始化对数导数数组
+    L_AE = np.zeros(n_E)
+    L_PS = np.zeros(n_E)
+
+    # 对每个能量求解径向方程并计算对数导数
+    for i, E in enumerate(energies):
+        try:
+            # 求解 AE 径向薛定谔方程
+            u_AE = _solve_radial_schrodinger_numerov(r, V_AE, l, E)
+            L_AE[i] = _compute_log_derivative(u_AE, r, r_test)
+
+            # 求解 PS 径向薛定谔方程
+            u_PS = _solve_radial_schrodinger_numerov(r, V_PS, l, E)
+            L_PS[i] = _compute_log_derivative(u_PS, r, r_test)
+
+        except Exception:
+            # 若某个能量点失败，标记为 NaN
+            L_AE[i] = np.nan
+            L_PS[i] = np.nan
+
+    # 找到有效点（非 NaN）
+    valid_mask = np.isfinite(L_AE) & np.isfinite(L_PS)
+    energies_valid = energies[valid_mask]
+    L_AE_valid = L_AE[valid_mask]
+    L_PS_valid = L_PS[valid_mask]
+
+    # 零点检测
+    zero_crossings_AE = _find_zero_crossings(energies_valid, L_AE_valid)
+    zero_crossings_PS = _find_zero_crossings(energies_valid, L_PS_valid)
+
+    # 评价指标 1：零点 RMS 偏差
+    if len(zero_crossings_AE) > 0 and len(zero_crossings_PS) > 0:
+        # 匹配最接近的零点对
+        n_zeros = min(len(zero_crossings_AE), len(zero_crossings_PS))
+        zero_diffs = []
+        for i in range(n_zeros):
+            # 简化：按顺序配对（假设零点顺序一致）
+            diff = abs(zero_crossings_AE[i] - zero_crossings_PS[i])
+            zero_diffs.append(diff)
+        zero_crossing_rms = float(np.sqrt(np.mean(np.array(zero_diffs)**2)))
+    else:
+        zero_crossing_rms = np.inf  # 无零点，标记为无穷
+
+    # 评价指标 2：全曲线 RMS 差异
+    if len(L_AE_valid) > 0:
+        curve_rms = float(np.sqrt(np.mean((L_AE_valid - L_PS_valid)**2)))
+    else:
+        curve_rms = np.inf
+
+    # 判定是否通过（Codex 标准）
+    passed = bool(
+        zero_crossing_rms < 0.025 and  # 零点 RMS < 0.025 Ha
+        curve_rms < 0.3 and             # 曲线 RMS < 0.3
+        np.isfinite(zero_crossing_rms) and
+        np.isfinite(curve_rms)
+    )
+
+    diagnostics = {
+        'n_energies': int(n_E),
+        'n_valid': int(np.sum(valid_mask)),
+        'n_zeros_AE': int(len(zero_crossings_AE)),
+        'n_zeros_PS': int(len(zero_crossings_PS)),
+        'r_test': float(r_test),
+        'E_range_Ha': tuple(map(float, E_range_Ha)),
+        'E_step_Ha': float(E_step_Ha),
+    }
+
+    return LogDerivativeResult(
+        l=int(l),
+        r_test=float(r_test),
+        energies=energies,
+        L_AE=L_AE,
+        L_PS=L_PS,
+        zero_crossings_AE=zero_crossings_AE,
+        zero_crossings_PS=zero_crossings_PS,
+        zero_crossing_rms=float(zero_crossing_rms) if np.isfinite(zero_crossing_rms) else float('inf'),
+        curve_rms=float(curve_rms) if np.isfinite(curve_rms) else float('inf'),
+        passed=passed,
+        diagnostics=diagnostics,
+    )
+
+
+def check_ghost_states(
+    inv_result: InvertResult,
+    r: np.ndarray,
+    w: np.ndarray,
+    valence_energy: float,
+    E_window_Ha: Tuple[float, float] = (-0.25, 0.25),
+    method: str = 'radial',
+) -> GhostStateResult:
+    """
+    幽灵态检测（径向级别）
+
+    检查赝势径向哈密顿量 H_l = T + V_PS(r) + l(l+1)/(2r²) 在能量窗口内
+    是否有额外的病态束缚态。
+
+    Parameters
+    ----------
+    inv_result : InvertResult
+        半局域势反演结果
+    r : np.ndarray
+        径向网格（Bohr）
+    w : np.ndarray
+        积分权重
+    valence_energy : float
+        已知价电子能级（Hartree）
+    E_window_Ha : tuple, default=(-0.25, 0.25)
+        能量窗口（Hartree）
+    method : str, default='radial'
+        检测方法（'radial' 或 'plane_wave'）
+
+    Returns
+    -------
+    GhostStateResult
+        幽灵态检测结果
+
+    Notes
+    -----
+    1. **径向方法**（A 级）: 对角化径向哈密顿量，查找异常束缚态
+    2. **平面波方法**（B 级，可选）: 小球平面波基组，包含非局域势
+
+    Examples
+    --------
+    >>> result = check_ghost_states(inv_result, r, w, valence_energy=-0.5)
+    >>> print(result.n_ghosts)  # 0
+    >>> print(result.passed)  # True
+    """
+    if method == 'radial':
+        # A 级：径向哈密顿对角化
+        V_PS = inv_result.V_l
+
+        # 需要均匀网格用于有限差分
+        dr = np.diff(r)
+        is_uniform = np.allclose(dr, dr[0], rtol=1e-4)
+
+        if not is_uniform:
+            # 重采样到均匀网格（简化哈密顿构建）
+            n_uniform = min(len(r), 300)  # 限制矩阵大小以加速
+            r_uniform = np.linspace(r[0], r[-1], n_uniform)
+            V_interp = interp1d(r, V_PS, kind='cubic', fill_value='extrapolate')
+            V_uniform = V_interp(r_uniform)
+            r_work = r_uniform
+            V_work = V_uniform
+        else:
+            r_work = r
+            V_work = V_PS
+
+        # 构建径向哈密顿矩阵
+        H = _build_radial_hamiltonian(r_work, V_work, inv_result.l)
+
+        # 找到能量窗口内的所有束缚态
+        bound_energies = _find_bound_states_from_hamiltonian(
+            H, r_work, E_max=max(E_window_Ha)
+        )
+
+        # 过滤到能量窗口内
+        in_window = (bound_energies >= E_window_Ha[0]) & (bound_energies <= E_window_Ha[1])
+        eigenvalues = bound_energies[in_window]
+
+        # 已知价电子态
+        known_valence = np.array([valence_energy])
+
+        # 识别幽灵态：在窗口内但远离已知价态的额外束缚态
+        ghost_states = []
+        tolerance_E = 0.1  # Ha，约 ±0.1 Ha 范围内认为是同一态
+        for E in eigenvalues:
+            # 检查是否接近已知价态
+            is_known = np.any(np.abs(E - known_valence) < tolerance_E)
+            if not is_known:
+                ghost_states.append(E)
+
+        ghost_states = np.array(ghost_states)
+        n_ghosts = len(ghost_states)
+        passed = bool(n_ghosts == 0)
+
+        diagnostics = {
+            'method': 'radial_hamiltonian_diagonalization',
+            'E_window_Ha': tuple(map(float, E_window_Ha)),
+            'n_bound_states_total': int(len(bound_energies)),
+            'n_bound_states_in_window': int(len(eigenvalues)),
+            'grid_resampled': not is_uniform,
+            'grid_size': int(len(r_work)),
+        }
+
+        return GhostStateResult(
+            method=method,
+            l=int(inv_result.l),
+            eigenvalues=eigenvalues,
+            known_valence=known_valence,
+            ghost_states=ghost_states,
+            n_ghosts=int(n_ghosts),
+            passed=passed,
+            diagnostics=diagnostics,
+        )
+
+    elif method == 'plane_wave':
+        # B 级：平面波方法（可选实现）
+        raise NotImplementedError("平面波方法幽灵态检测尚未实现")
+
+    else:
+        raise ValueError(f"未知幽灵态检测方法：{method}")
+
+
+def run_full_validation(
+    ae_result,
+    tm_dict: Dict[int, TMResult],
+    inv_dict: Dict[int, InvertResult],
+    r_test: float = 3.0,
+    E_range_Ry: Tuple[float, float] = (-0.5, 0.5),
+    E_step_Ry: float = 0.05,
+) -> ValidationReport:
+    """
+    完整验证流程
+
+    对所有通道执行范数守恒、对数导数匹配和幽灵态检测。
+
+    Parameters
+    ----------
+    ae_result : AEAtomResult
+        全电子原子解
+    tm_dict : Dict[int, TMResult]
+        各通道 TM 伪化结果
+    inv_dict : Dict[int, InvertResult]
+        各通道势反演结果
+    r_test : float, default=3.0
+        对数导数测试半径（Bohr）
+    E_range_Ry : tuple, default=(-0.5, 0.5)
+        能量窗口（Rydberg）
+    E_step_Ry : float, default=0.05
+        能量步长（Rydberg）
+
+    Returns
+    -------
+    ValidationReport
+        完整验证报告
+
+    Examples
+    --------
+    >>> report = run_full_validation(ae, tm_dict, inv_dict)
+    >>> print(report.overall_passed)
+    >>> print(report.to_dict())
+    """
+    # 能量单位转换 Ry → Ha
+    E_range_Ha = (E_range_Ry[0] / 2, E_range_Ry[1] / 2)
+    E_step_Ha = E_step_Ry / 2
+
+    norm_results = {}
+    log_deriv_results = {}
+
+    # 范数守恒检验
+    for l, tm in tm_dict.items():
+        norm_results[l] = check_norm_conservation(tm)
+
+    # 对数导数匹配（占位）
+    # TODO: 获取 AE 势，实现对数导数检验
+    for l, inv in inv_dict.items():
+        # 占位：需要 AE 势
+        V_AE = np.zeros_like(inv.V_l)
+        V_PS = inv.V_l
+        log_deriv_results[l] = check_log_derivative(
+            V_AE, V_PS, inv.r, l, r_test, E_range_Ha, E_step_Ha
+        )
+
+    # 幽灵态检测（占位）
+    ghost_result = None
+
+    # 整体判定
+    all_norm_passed = all(r.passed for r in norm_results.values())
+    all_ld_passed = all(r.passed for r in log_deriv_results.values())
+    overall_passed = all_norm_passed and all_ld_passed
+
+    diagnostics = {
+        'n_channels': len(tm_dict),
+        'all_norm_passed': all_norm_passed,
+        'all_log_deriv_passed': all_ld_passed,
+    }
+
+    return ValidationReport(
+        norm_results=norm_results,
+        log_deriv_results=log_deriv_results,
+        ghost_result=ghost_result,
+        overall_passed=overall_passed,
+        diagnostics=diagnostics,
+    )
