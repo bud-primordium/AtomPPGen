@@ -14,6 +14,7 @@ from atomppgen.validate import (
     LogDerivativeResult,
     check_ghost_states,
     GhostStateResult,
+    _extract_ks_potential,
 )
 
 
@@ -141,6 +142,32 @@ class TestLogDerivative:
     """测试对数导数匹配"""
 
     @pytest.mark.unit
+    def test_ks_potential_extraction(self):
+        """测试 KS 有效势提取"""
+        # 生成 Al 全电子解
+        ae = solve_ae_atom(Z=13, spin_mode='LDA', lmax=0, grid_params={'n': 600})
+
+        # 提取 KS 势
+        V_ks = _extract_ks_potential(ae)
+
+        # 检查基本性质
+        assert len(V_ks) == len(ae.r), "势与网格长度不匹配"
+        assert np.all(np.isfinite(V_ks)), "势存在非有限值"
+
+        # KS 势应为负（吸引势）
+        assert np.all(V_ks < 0), "KS 势应为吸引势"
+
+        # 在大 r 处应趋向 0（电子完全屏蔽核电荷）
+        assert abs(V_ks[-1]) < 1e-6, \
+            f"大 r 处势未趋向 0: {V_ks[-1]:.3e}"
+
+        # 势应随 r 单调递增（越靠近核越深）
+        # 检查后半部分网格（避免数值噪音）
+        r_mid = ae.r[len(ae.r)//2:]
+        V_mid = V_ks[len(V_ks)//2:]
+        assert np.all(np.diff(V_mid) > -1e-3), "势应单调或近似单调"
+
+    @pytest.mark.unit
     def test_log_derivative_basic(self):
         """测试对数导数基本功能"""
         # 创建简单的网格和势
@@ -175,18 +202,19 @@ class TestLogDerivative:
 
     @pytest.mark.integration
     def test_log_derivative_with_tm_pseudopotential(self):
-        """测试 TM 赝势的对数导数匹配"""
+        """测试 TM 赝势的对数导数匹配（使用真实 KS 势）"""
         # 生成 Al 的 AE 解和 TM 伪化
         ae = solve_ae_atom(Z=13, spin_mode='LDA', lmax=0, grid_params={'n': 600})
         tm = tm_pseudize(ae.r, ae.w, ae.u_by_l[0][-1], ae.eps_by_l[0][-1], l=0, rc=2.0)
 
-        # 构建简化的 AE 和 PS 势（仅核势近似）
-        Z = 13.0
-        V_AE = -Z / np.maximum(ae.r, 0.01)
+        # 反演得到伪势
+        inv = invert_semilocal_potential(tm, ae.r)
 
-        # 从 TM 结果反演得到伪势（简化：直接用核势的缩放版本模拟）
-        # 实际应该用 invert_semilocal_potential 反演
-        V_PS = -Z / np.maximum(ae.r, 0.01) * 0.9
+        # 提取真实 KS 有效势（AE）
+        V_AE = _extract_ks_potential(ae)
+
+        # PS 半局域势
+        V_PS = inv.V_l
 
         # 对数导数检验（缩小能量范围加速测试）
         result = check_log_derivative(
@@ -199,7 +227,11 @@ class TestLogDerivative:
         assert isinstance(result, LogDerivativeResult)
         assert result.diagnostics['n_valid'] > 0, "应有有效的能量点"
 
-        # 注意：由于使用了简化势，不强制要求通过严格的判据
+        # 检查对数导数曲线不全为零（说明求解成功）
+        assert np.any(np.abs(result.L_AE) > 1e-6), "AE 对数导数不应全为零"
+        assert np.any(np.abs(result.L_PS) > 1e-6), "PS 对数导数不应全为零"
+
+        # 不强制要求通过严格判据（需要更精细的能量扫描和 rc 优化）
         assert isinstance(result.passed, bool)
 
 

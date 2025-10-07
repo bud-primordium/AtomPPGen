@@ -27,6 +27,10 @@ from scipy.interpolate import interp1d
 
 from atomppgen.tm import TMResult
 from atomppgen.invert import InvertResult
+from atomppgen.ae_atom import AEAtomResult
+
+# 导入 AtomSCF 势函数
+from atomscf.scf import v_hartree, vx_dirac, lda_c_pz81, lda_c_vwn
 
 
 __all__ = [
@@ -460,6 +464,76 @@ def _find_bound_states_from_hamiltonian(
                 bound_energies.append(E)
 
     return np.array(sorted(bound_energies))
+
+
+def _extract_ks_potential(
+    ae_result: AEAtomResult,
+) -> np.ndarray:
+    """
+    从全电子原子解提取 Kohn-Sham 有效势
+
+    计算 V_AE(r) = v_ext(r) + v_H[n](r) + v_xc[n](r)
+
+    不含离心项 l(l+1)/(2r²)，该项在径向求解器内部添加。
+
+    Parameters
+    ----------
+    ae_result : AEAtomResult
+        全电子原子求解结果
+
+    Returns
+    -------
+    V_ks : np.ndarray
+        Kohn-Sham 有效势（Hartree），与 ae_result.r 同长度
+
+    Notes
+    -----
+    1. **外势**: v_ext = -Z/r（核-电子吸引）
+    2. **Hartree 势**: v_H = ∫ n(r')/|r-r'| dr'（电子-电子排斥）
+    3. **交换关联势**: v_xc 根据 ae_result.xc 选择 PZ81 或 VWN
+    4. **自旋处理**: LDA 模式下 n_up = n_dn = n_total/2
+
+    References
+    ----------
+    - Martin, Electronic Structure (2004), Eq. 6.31
+    - AtomSCF 文档: scf.py
+    """
+    r = ae_result.r
+    n_total = ae_result.n_total
+    Z = ae_result.Z
+    xc = ae_result.xc
+
+    # 1. 外势（核-电子吸引）
+    r_safe = np.maximum(r, 1e-10)  # 避免 r=0 除零
+    v_ext = -Z / r_safe
+
+    # 2. Hartree 势（电子-电子排斥）
+    v_H = v_hartree(n_total, r, ae_result.w)
+
+    # 3. 交换关联势
+    # LDA 模式：自旋对称，n_up = n_dn = n_total/2
+    n_up = n_total / 2.0
+    n_dn = n_total / 2.0
+
+    # 交换势（Dirac/Slater）
+    v_x = vx_dirac(n_up)  # 对每个自旋分量
+
+    # 关联势
+    if xc.upper() == 'PZ81':
+        _, _, v_c_up, v_c_dn = lda_c_pz81(n_up, n_dn)
+        v_c = (v_c_up + v_c_dn) / 2.0  # 自旋平均
+    elif xc.upper() == 'VWN':
+        _, _, v_c_up, v_c_dn = lda_c_vwn(n_up, n_dn)
+        v_c = (v_c_up + v_c_dn) / 2.0
+    else:
+        raise ValueError(f"未知 XC 泛函: {xc}")
+
+    v_xc = v_x + v_c
+
+    # 4. 总 KS 势
+    V_ks = v_ext + v_H + v_xc
+
+    return V_ks
 
 
 def check_norm_conservation(
