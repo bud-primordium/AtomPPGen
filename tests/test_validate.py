@@ -15,6 +15,8 @@ from atomppgen.validate import (
     check_ghost_states,
     GhostStateResult,
     _extract_ks_potential,
+    run_full_validation,
+    ValidationReport,
 )
 
 
@@ -322,3 +324,52 @@ class TestGhostStates:
         assert isinstance(result.n_ghosts, int)
         assert isinstance(result.passed, bool)
         assert isinstance(result.diagnostics, dict)
+
+
+class TestFullValidation:
+    """测试完整验证流程"""
+
+    @pytest.mark.integration
+    def test_full_validation_s_channel(self):
+        """测试单通道（s）完整验证"""
+        # 生成 Al 的 AE 解和伪化
+        ae = solve_ae_atom(Z=13, spin_mode='LDA', lmax=0, grid_params={'n': 600})
+        tm_s = tm_pseudize(ae.r, ae.w, ae.u_by_l[0][-1], ae.eps_by_l[0][-1], l=0, rc=2.0)
+        inv_s = invert_semilocal_potential(tm_s, ae.r)
+
+        # 构建字典
+        tm_dict = {0: tm_s}
+        inv_dict = {0: inv_s}
+
+        # 完整验证（缩小能量范围加速）
+        report = run_full_validation(
+            ae, tm_dict, inv_dict,
+            r_test=3.0,
+            E_range_Ry=(-0.4, 0.4),  # 缩小范围加速
+            E_step_Ry=0.1
+        )
+
+        # 检查报告类型
+        assert isinstance(report, ValidationReport)
+
+        # 检查结果字典
+        assert 0 in report.norm_results
+        assert 0 in report.log_deriv_results
+        assert isinstance(report.ghost_result, GhostStateResult) or report.ghost_result is None
+
+        # 检查整体判定
+        assert isinstance(report.overall_passed, bool)
+
+        # 检查诊断信息
+        assert 'n_channels' in report.diagnostics
+        assert report.diagnostics['n_channels'] == 1
+        assert 'all_norm_passed' in report.diagnostics
+        assert 'all_log_deriv_passed' in report.diagnostics
+        assert 'all_ghost_passed' in report.diagnostics
+
+        # 验证 to_dict 方法
+        report_dict = report.to_dict()
+        assert isinstance(report_dict, dict)
+        assert 'norm_results' in report_dict
+        assert 'log_deriv_results' in report_dict
+        assert 'overall_passed' in report_dict

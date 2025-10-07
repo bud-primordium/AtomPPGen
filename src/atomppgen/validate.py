@@ -901,41 +901,61 @@ def run_full_validation(
     E_range_Ha = (E_range_Ry[0] / 2, E_range_Ry[1] / 2)
     E_step_Ha = E_step_Ry / 2
 
-    norm_results = {}
-    log_deriv_results = {}
+    # 提取 KS 有效势（一次性，所有通道共享）
+    V_KS = _extract_ks_potential(ae_result)
 
-    # 范数守恒检验
+    # 1. 范数守恒检验
+    norm_results = {}
     for l, tm in tm_dict.items():
         norm_results[l] = check_norm_conservation(tm)
 
-    # 对数导数匹配（占位）
-    # TODO: 获取 AE 势，实现对数导数检验
+    # 2. 对数导数匹配
+    log_deriv_results = {}
     for l, inv in inv_dict.items():
-        # 占位：需要 AE 势
-        V_AE = np.zeros_like(inv.V_l)
         V_PS = inv.V_l
         log_deriv_results[l] = check_log_derivative(
-            V_AE, V_PS, inv.r, l, r_test, E_range_Ha, E_step_Ha
+            V_KS, V_PS, ae_result.r, l, r_test, E_range_Ha, E_step_Ha
         )
 
-    # 幽灵态检测（占位）
-    ghost_result = None
+    # 3. 幽灵态检测（对每个通道）
+    ghost_results = {}
+    for l, inv in inv_dict.items():
+        # 获取该通道的价电子能量
+        if l < len(tm_dict):
+            tm = tm_dict[l]
+            valence_energy = tm.eps
+        else:
+            # 若没有对应的 TM 结果，跳过
+            continue
+
+        ghost_results[l] = check_ghost_states(
+            inv, ae_result.r, ae_result.w,
+            valence_energy=valence_energy,
+            E_window_Ha=E_range_Ha,
+            method='radial'
+        )
 
     # 整体判定
     all_norm_passed = all(r.passed for r in norm_results.values())
     all_ld_passed = all(r.passed for r in log_deriv_results.values())
-    overall_passed = all_norm_passed and all_ld_passed
+    all_ghost_passed = all(r.passed for r in ghost_results.values())
+    overall_passed = all_norm_passed and all_ld_passed and all_ghost_passed
 
     diagnostics = {
         'n_channels': len(tm_dict),
+        'r_test': float(r_test),
+        'E_range_Ha': tuple(map(float, E_range_Ha)),
+        'E_step_Ha': float(E_step_Ha),
+        'channels_tested': list(tm_dict.keys()),
         'all_norm_passed': all_norm_passed,
         'all_log_deriv_passed': all_ld_passed,
+        'all_ghost_passed': all_ghost_passed,
     }
 
     return ValidationReport(
         norm_results=norm_results,
         log_deriv_results=log_deriv_results,
-        ghost_result=ghost_result,
+        ghost_result=ghost_results.get(0, None),  # 返回 s 通道幽灵态结果作为代表
         overall_passed=overall_passed,
         diagnostics=diagnostics,
     )
