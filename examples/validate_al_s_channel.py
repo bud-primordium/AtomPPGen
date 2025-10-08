@@ -3,6 +3,26 @@ Al s 通道赝势验证示例
 
 演示完整验证流程：范数守恒 → 对数导数匹配 → 幽灵态检测
 生成 JSON 报告和对数导数曲线图
+
+运行方式
+--------
+从仓库根目录执行：
+
+    PYTHONPATH=AtomPPGen/src:AtomSCF/src python AtomPPGen/examples/validate_al_s_channel.py
+
+或使用仓库内虚拟环境：
+
+    PYTHONPATH=AtomPPGen/src:AtomSCF/src AtomPPGen/.venv/bin/python \\
+        AtomPPGen/examples/validate_al_s_channel.py
+
+可选参数：
+    --ghost-grid-n N    幽灵态检测径向网格重采样尺寸（默认 300）
+
+注意事项
+--------
+- 价区验证建议使用 E_step_Ry ≤ 0.02 以保证至少 10 个采样点
+- 当前默认 E_step_Ry=0.05，价区仅 2-3 个点，统计意义有限
+- 输出文件保存在 outputs/ 目录
 """
 
 import json
@@ -92,7 +112,10 @@ def main():
     ld_result = report.log_deriv_results[0]
     print(f"\n[对数导数匹配 @ r={ld_result.r_test} Bohr]")
     print(f"  零点 RMS: {ld_result.zero_crossing_rms:.6f} Ha ({ld_result.zero_crossing_rms*2:.6f} Ry)")
-    print(f"  曲线 RMS: {ld_result.curve_rms:.6f}")
+    print(f"  曲线 RMS (价区): {ld_result.curve_rms_valence:.6f}")
+    print(f"  曲线 RMS (全窗): {ld_result.curve_rms_full:.6f}")
+    n_valence_pts = ld_result.diagnostics.get('n_valence_points', 0)
+    print(f"  价区点数: {n_valence_pts}")
     print(f"  零点数 (AE/PS): {len(ld_result.zero_crossings_AE)}/{len(ld_result.zero_crossings_PS)}")
     print(f"  通过: {'✓' if ld_result.passed else '✗'}")
 
@@ -102,7 +125,8 @@ def main():
         print(f"\n[幽灵态检测]")
         print(f"  方法: {ghost.method}")
         print(f"  窗口内束缚态: {ghost.diagnostics['n_bound_states_in_window']}")
-        print(f"  幽灵态数量: {ghost.n_ghosts}")
+        print(f"  真幽灵态: {ghost.n_ghosts}")
+        print(f"  盒态 (网格假信号): {ghost.n_box_states}")
         print(f"  通过: {'✓' if ghost.passed else '✗'}")
         if ghost.diagnostics.get('grid_resampled', False):
             print(f"  径向网格重采样: ✓, 尺寸={ghost.diagnostics['grid_size']} (上限={ghost.diagnostics.get('grid_n_cap', '300')})")
