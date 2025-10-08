@@ -65,13 +65,13 @@ def main():
     print(f"  ✓ 3s 能级: {ae.eps_by_l[0][-1]:.6f} Ha")
 
     # 2. TM 伪化
-    print("\n[2/4] TM 伪化 (s 通道, rc=2.0 Bohr)...")
+    print("\n[2/4] TM 伪化 (s 通道, rc=2.5 Bohr)...")
     tm_s = tm_pseudize(
         ae.r, ae.w,
         ae.u_by_l[0][-1],
         ae.eps_by_l[0][-1],
         l=0,
-        rc=2.0
+        rc=2.5  # 最优参数（基于系统化实验：零点RMS 0.021 < 0.025）
     )
     print(f"  ✓ 范数误差: {tm_s.norm_error:.3e}")
     print(f"  ✓ 连续性阶数: {tm_s.continuity_orders}")
