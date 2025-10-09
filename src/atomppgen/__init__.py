@@ -9,8 +9,8 @@ AtomPPGen: 模守恒赝势生成器
 - tm: TM 伪化器
 - invert: 半局域势反演
 - kb: KB 可分离形式转换
-- validate: 可转移性检验（范数/对数导数/幽灵态）（开发中）
-- io: 数据导入导出（开发中）
+- validate: 可转移性检验（范数/对数导数/幽灵态）
+- export: 赝势导出（JSON/NPZ/UPF格式）
 """
 
 __version__ = "0.1.0"
@@ -20,6 +20,7 @@ from atomppgen.ae_atom import solve_ae_atom, AEAtomResult
 from atomppgen.tm import tm_pseudize, TMResult
 from atomppgen.invert import invert_semilocal_potential, InvertResult
 from atomppgen.kb import kb_transform, KBResult
+from atomppgen.export import export_pseudopotential, PseudopotentialData
 
 __all__ = [
     "__version__",
@@ -31,4 +32,6 @@ __all__ = [
     "InvertResult",
     "kb_transform",
     "KBResult",
+    "export_pseudopotential",
+    "PseudopotentialData",
 ]

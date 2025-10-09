@@ -14,6 +14,7 @@ API 参考
    invert
    kb
    validate
+   export
 
 模块概览
 --------
@@ -27,3 +28,4 @@ API 参考
    atomppgen.invert
    atomppgen.kb
    atomppgen.validate
+   atomppgen.export
