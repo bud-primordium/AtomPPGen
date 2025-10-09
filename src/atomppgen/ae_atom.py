@@ -155,7 +155,6 @@ def solve_ae_atom(
     ----------
     - 变量变换方法：AtomSCF/docs/source/algorithm/numerical_methods.rst
     - NIST 原子数据：https://www.nist.gov/pml/atomic-reference-data-electronic-structure-calculations
-    - AtomSCF 更新日志：.workenv/For_AtomSCF/progress/1005_finalize/usage_supply.md
     """
     # 验证输入
     if xc not in ("PZ81", "VWN"):

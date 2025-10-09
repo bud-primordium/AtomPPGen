@@ -11,7 +11,6 @@
 import pytest
 import numpy as np
 import json
-from pathlib import Path
 from atomppgen import solve_ae_atom, tm_pseudize, invert_semilocal_potential
 from atomppgen.export import export_pseudopotential, PseudopotentialData
 from atomppgen.validate import run_full_validation
@@ -22,7 +21,7 @@ def al_s_data():
     """
     提供 Al s 通道的测试数据（全电子 + TM + 反演）
 
-    复用 M5 验证的最优参数：rc=2.5 Bohr
+    使用参考参数：rc=2.5 Bohr
     """
     # 1. 全电子解（使用较小网格加速测试）
     ae = solve_ae_atom(

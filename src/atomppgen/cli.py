@@ -71,8 +71,8 @@ def main():
     print(f"[占位] ppgen {args.command} 命令已接收")
     print(f"[占位] 参数: {vars(args)}")
     print()
-    print("注意：当前为占位实现，完整功能将在后续里程碑中实现。")
-    print("      预计在 M6（导出与示例）阶段完成 CLI 全部功能。")
+    print("注意：当前为占位实现，完整功能正在开发中。")
+    print("      请使用 Python API 或参考 examples/ 目录中的示例脚本。")
 
     return 0
 

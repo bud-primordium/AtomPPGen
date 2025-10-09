@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.20",
     "scipy>=1.7",
+    "atomscf @ git+https://github.com/bud-primordium/AtomSCF.git",
 ]
 
 [project.optional-dependencies]
