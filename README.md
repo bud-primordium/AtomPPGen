@@ -185,16 +185,6 @@ result = solve_ae_atom(
 
 ---
 
-## 开发规范
-
-- **语言**：代码注释与文档使用**中文**
-- **Docstring**：NumPy 风格
-- **公式**：使用 LaTeX（`:math:` 或 `.. math::`）
-- **测试**：pytest（`tests/` 目录，`-m unit` 标记）
-- **Git 提交**：Conventional Commits 格式（英文，无 AI 痕迹）
-
----
-
 ## 参考资料
 
 - **TM 方法**: Troullier & Martins, *PRB* 43, 1993 (1991)
