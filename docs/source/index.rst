@@ -12,6 +12,19 @@ AtomPPGen 文档
    api/index
    examples/index
 
+.. toctree::
+   :maxdepth: 2
+   :caption: 用户指南
+
+   user_guide/parameter_selection
+   user_guide/validation_standards
+
+.. toctree::
+   :maxdepth: 2
+   :caption: 实验结果
+
+   results/al_lda_validation
+
 简介
 ----
 

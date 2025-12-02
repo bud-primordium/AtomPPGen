@@ -3,13 +3,6 @@
 
 本节提供完整的使用示例和常见使用模式。
 
-.. toctree::
-   :maxdepth: 2
-
-   al_pseudopotential
-   testing_transferability
-   export_formats
-
 快速开始
 --------
 
@@ -102,9 +95,9 @@ SCF 不收敛
 如果遇到 SCF 不收敛问题：
 
 1. 增加迭代次数：``scf_params={"maxiter": 300}``
-2. 调整混合参数：``scf_params={"mix_alpha": 0.2}``（减小）
+2. 调整混合参数：``scf_params={"mix_alpha": 0.2}`` (减小)
 3. 增加网格点数：``grid_params={"n": 1200}``
-4. 降低收敛阈值：``scf_params={"tol": 1e-5}``（放松）
+4. 降低收敛阈值：``scf_params={"tol": 1e-5}`` (放松)
 
 网格选择
 ~~~~~~~~
