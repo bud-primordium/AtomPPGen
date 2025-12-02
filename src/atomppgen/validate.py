@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.integrate import simpson
 
 from atomppgen.tm import TMResult
 from atomppgen.invert import InvertResult
@@ -73,6 +74,60 @@ __all__ = [
     "check_ghost_states",
     "run_full_validation",
 ]
+
+
+_L_TO_CHANNEL = {
+    0: 's',
+    1: 'p',
+    2: 'd',
+    3: 'f',
+    4: 'g',
+}
+_CHANNEL_TO_L = {v: k for k, v in _L_TO_CHANNEL.items()}
+
+_COVALENT_ELEMENTS = {
+    'B', 'C', 'N', 'O', 'F', 'Si', 'P', 'S', 'Cl', 'Ge', 'As'
+}
+
+_Z_TO_SYMBOL = {
+    1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O',
+    9: 'F', 10: 'Ne', 11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P',
+    16: 'S', 17: 'Cl', 18: 'Ar', 19: 'K', 20: 'Ca',
+}
+
+
+def is_covalent(element: Optional[str]) -> bool:
+    """判断元素是否以共价价键表现为主，影响阈值选择"""
+    if not element:
+        return False
+    symbol = str(element).strip().title()
+    return symbol in _COVALENT_ELEMENTS
+
+
+def _channel_label(l: int) -> str:
+    """将角动量量子数转换为通道标签"""
+    return _L_TO_CHANNEL.get(l, f"l={l}")
+
+
+def _channel_to_l_index(channel: str) -> Optional[int]:
+    """将通道标签转换回角动量量子数"""
+    if not channel:
+        return None
+    return _CHANNEL_TO_L.get(channel.lower())
+
+
+def _infer_element_from_diag(diagnostics: Dict) -> str:
+    """从诊断字段中尽量推断元素符号"""
+    if not diagnostics:
+        return ''
+    if diagnostics.get('element_symbol'):
+        return str(diagnostics['element_symbol'])
+    if diagnostics.get('element'):
+        return str(diagnostics['element'])
+    if diagnostics.get('element_Z'):
+        Z = int(diagnostics['element_Z'])
+        return _Z_TO_SYMBOL.get(Z, f'Z{Z}')
+    return ''
 
 
 @dataclass
@@ -239,6 +294,7 @@ class ValidationReport:
                 'passed': r.passed,
             } for l, r in self.log_deriv_results.items()},
             'ghost_result': {
+                'l': int(self.ghost_result.l),
                 'n_ghosts': self.ghost_result.n_ghosts,
                 'n_box_states': self.ghost_result.n_box_states,
                 'ghost_states': self.ghost_result.ghost_states.tolist(),
@@ -250,6 +306,129 @@ class ValidationReport:
             } if self.ghost_result else None,
             'overall_passed': self.overall_passed,
         }
+
+    def summary(self) -> str:
+        """
+        生成 Markdown 验证摘要，便于在报告或导出文件中引用
+        """
+        channels = set(self.norm_results.keys()) | set(self.log_deriv_results.keys())
+        if isinstance(self.diagnostics.get('channels_tested'), list):
+            channels.update(int(l) for l in self.diagnostics['channels_tested'])
+        ghost_diag = self.diagnostics.get('ghost_counts_by_l', {}) or {}
+        for key in ghost_diag.keys():
+            try:
+                channels.add(int(key))
+            except Exception:
+                continue
+
+        if self.ghost_result is not None:
+            channels.add(int(self.ghost_result.l))
+
+        channels = sorted(channels)
+        if not channels:
+            return "## 验证摘要\n\n无可用通道的验证数据。"
+
+        lines = [
+            "## 验证摘要",
+            "",
+            "| 通道 | 范数误差 | 对数导数 RMS | 幽灵态数 | 评级 |",
+            "|------|----------|--------------|----------|------|",
+        ]
+
+        ratings = []
+        for l in channels:
+            channel_label = _channel_label(l)
+            norm_result = self.norm_results.get(l)
+            norm_error = abs(norm_result.norm_error) if norm_result else None
+            if norm_error is None or not np.isfinite(norm_error):
+                norm_str = "N/A"
+            else:
+                norm_str = f"{norm_error:.2e}"
+
+            log_result = self.log_deriv_results.get(l)
+            rms_valence = log_result.curve_rms_valence if log_result else None
+            if rms_valence is None or not np.isfinite(rms_valence):
+                rms_str = "N/A"
+            else:
+                rms_str = f"{rms_valence:.2f}"
+
+            ghost_count = self._ghost_count_for_channel(l)
+            ghost_str = str(ghost_count) if ghost_count is not None else "N/A"
+
+            rating = self._evaluate_risk(channel_label)
+            ratings.append(rating)
+
+            lines.append(
+                f"| {channel_label} | {norm_str} | {rms_str} | {ghost_str} | {rating} |"
+            )
+
+        if 'FAIL' in ratings:
+            overall_rating = 'FAIL'
+        elif 'WARNING' in ratings:
+            overall_rating = 'WARNING'
+        else:
+            overall_rating = 'PASS'
+
+        lines.extend([
+            "",
+            f"**综合评级**: {overall_rating}",
+            f"**整体验证**: {'PASS' if self.overall_passed else 'FAIL'}",
+            "",
+            "**说明**:",
+            "- PASS: 所有关键指标位于安全范围内，可直接投入材料计算",
+            "- WARNING: 存在临界指标，建议调整 rc 或增加高 l 通道以提升保真度",
+            "- FAIL: 指标超过阈值，赝势不可用或需重新生成",
+        ])
+
+        return "\n".join(lines)
+
+    def _ghost_count_for_channel(self, l: Optional[int]) -> Optional[int]:
+        """提取指定角动量通道的幽灵态数量"""
+        if l is None:
+            return None
+        diag_counts = self.diagnostics.get('ghost_counts_by_l') or {}
+        if isinstance(diag_counts, dict):
+            if l in diag_counts:
+                return diag_counts[l]
+            key = str(l)
+            if key in diag_counts:
+                return diag_counts[key]
+        if self.ghost_result and self.ghost_result.l == l:
+            return self.ghost_result.n_ghosts
+        return None
+
+    def _evaluate_risk(self, channel: str) -> str:
+        """评估单个通道的风险等级"""
+        l = _channel_to_l_index(channel)
+        norm_error = None
+        if l is not None and l in self.norm_results:
+            norm_error = abs(self.norm_results[l].norm_error)
+
+        rms_valence = None
+        if l is not None and l in self.log_deriv_results:
+            rms_valence = self.log_deriv_results[l].curve_rms_valence
+
+        n_ghosts = self._ghost_count_for_channel(l)
+        element_symbol = _infer_element_from_diag(self.diagnostics)
+
+        # FAIL 判据
+        if norm_error is not None and norm_error > 1e-5:
+            return "FAIL"
+        if rms_valence is not None and np.isfinite(rms_valence) and rms_valence > 30.0:
+            return "FAIL"
+
+        # WARNING 判据
+        if norm_error is not None and norm_error > 1e-6:
+            return "WARNING"
+        if (
+            rms_valence is not None and np.isfinite(rms_valence)
+            and rms_valence > 16.0 and is_covalent(element_symbol)
+        ):
+            return "WARNING"
+        if n_ghosts is not None and n_ghosts > 10:
+            return "WARNING"
+
+        return "PASS"
 
 
 def _solve_radial_schrodinger_numerov(
@@ -342,7 +521,7 @@ def _solve_radial_schrodinger_numerov(
         u[i + 1] = (c1 * u[i] - c0 * u[i - 1]) / c2
 
     # 归一化（简单归一化，确保数值稳定）
-    norm = np.sqrt(np.trapz(u**2, r_work))
+    norm = np.sqrt(simpson(u**2, x=r_work))
     if norm > 1e-12:
         u /= norm
 
@@ -959,8 +1138,20 @@ def check_ghost_states(
         for i, E in enumerate(eigenvalues):
             # 检查是否接近已知价态
             is_known = np.any(np.abs(E - known_valence) < tolerance_E)
-            if not is_known:
-                # 根据尾部比例分类：盒态 vs 真幽灵态
+            if is_known:
+                continue
+
+            # 能量感知分类（区分危险幽灵态与安全的 Rydberg/散射态）
+            if E > 0:
+                # 正能态：散射态（连续谱的盒离散化），非真正束缚态
+                box_states_list.append(E)
+            elif E > valence_energy - 0.01:
+                # 负能但高于价态：Rydberg 激发态序列（如 4s, 5s, 6s...），
+                # 距离费米能级较远，对基态 DFT 影响可忽略
+                box_states_list.append(E)
+            else:
+                # 显著低于价态（< -0.01 Ha）：潜在的危险幽灵态
+                # 仍需 tail_ratio 二次判定，排除盒边界效应
                 if is_box_window[i]:
                     box_states_list.append(E)
                 else:
@@ -973,7 +1164,6 @@ def check_ghost_states(
 
         # 判定是否通过：容忍少量幽灵态（≤ 10）
         # 理由：TM 伪化产生的浅幽灵态（能量接近 0）对基态 DFT 影响有限
-        # 参考：m5_threshold_decision.md 第 4.1 节方案 2
         passed = bool(n_ghosts <= 10)
 
         diagnostics = {
@@ -1106,6 +1296,9 @@ def run_full_validation(
         'all_norm_passed': all_norm_passed,
         'all_log_deriv_passed': all_ld_passed,
         'all_ghost_passed': all_ghost_passed,
+        'element_Z': int(ae_result.Z),
+        'element_symbol': _Z_TO_SYMBOL.get(int(ae_result.Z), f"Z{int(ae_result.Z)}"),
+        'ghost_counts_by_l': {int(l): int(res.n_ghosts) for l, res in ghost_results.items()},
     }
 
     return ValidationReport(

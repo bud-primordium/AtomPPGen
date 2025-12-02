@@ -136,7 +136,8 @@ class TestRadialSolver:
         assert np.all(np.isfinite(psi)), "波函数存在非有限值"
 
         # 检查归一化区间积分为正
-        norm = np.trapezoid(psi**2, r)
+        from scipy.integrate import simpson
+        norm = simpson(psi**2, x=r)
         assert norm > 0, "波函数积分应为正"
 
 

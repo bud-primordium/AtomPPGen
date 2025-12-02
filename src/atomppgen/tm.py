@@ -20,7 +20,7 @@ Troullier & Martins, PRB 43, 1993 (1991)
 from dataclasses import dataclass
 from typing import Dict, Optional
 import numpy as np
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, least_squares
 from scipy.integrate import simpson
 from scipy.interpolate import CubicSpline
 
@@ -151,6 +151,14 @@ def tm_pseudize(
     # 计算 AE 轨道在 rc 处的导数（使用样条法，适用于非均匀网格）
     derivs_ae = eval_derivatives_at(r, u_ae, rc, max_order=continuity_orders)
 
+    # 获取 rc 处的符号，用于处理存在节点的价层轨道
+    sign_prefactor = np.sign(derivs_ae[0])
+    if sign_prefactor == 0:
+        sign_prefactor = np.sign(u_ae[i_rc])
+    if sign_prefactor == 0:
+        sign_prefactor = 1.0
+    sign_prefactor = float(sign_prefactor)
+
     # 计算 AE 轨道的内区范数
     norm_ae = _compute_norm(r, w, u_ae, i_rc)
 
@@ -164,10 +172,11 @@ def tm_pseudize(
         continuity_orders=continuity_orders,
         r_inner=r[:i_rc+1],
         w_inner=w[:i_rc+1],
+        sign_prefactor=sign_prefactor,
     )
 
     # 拼接内外区生成完整伪轨道
-    u_ps = _splice_orbital(r, u_ae, a_coeff, l, i_rc)
+    u_ps = _splice_orbital(r, u_ae, a_coeff, l, i_rc, sign_prefactor)
 
     # 计算范数守恒误差
     norm_ps = _compute_norm(r, w, u_ps, i_rc)
@@ -179,7 +188,8 @@ def tm_pseudize(
         l=l,
         a_coeff=a_coeff,
         derivs_ae=derivs_ae,
-        order=continuity_orders
+        order=continuity_orders,
+        sign_prefactor=sign_prefactor,
     )
 
     return TMResult(
@@ -390,7 +400,7 @@ def _compute_norm(
     return np.sum(u[:i_rc+1]**2 * w[:i_rc+1])
 
 
-def _eval_tm_at_rc(rc: float, l: int, a: np.ndarray) -> np.ndarray:
+def _eval_tm_at_rc(rc: float, l: int, a: np.ndarray, sign_prefactor: float = 1.0) -> np.ndarray:
     """
     计算 TM 轨道及其导数在 rc 处的值
 
@@ -404,6 +414,9 @@ def _eval_tm_at_rc(rc: float, l: int, a: np.ndarray) -> np.ndarray:
         角动量
     a : np.ndarray
         系数 [a_0, a_2, a_4, ...]
+
+    sign_prefactor : float, optional
+        AE 轨道在 rc 处的符号，用于恢复正确符号
 
     Returns
     -------
@@ -460,7 +473,8 @@ def _eval_tm_at_rc(rc: float, l: int, a: np.ndarray) -> np.ndarray:
         + r_pow * (p1**4 + 6*p1**2*p2 + 4*p1*p3 + 3*p2**2 + p4)
     ) * exp_p
 
-    return np.array([u, u1, u2, u3, u4])
+    derivs = np.array([u, u1, u2, u3, u4])
+    return sign_prefactor * derivs
 
 
 def _compute_tm_norm(
@@ -511,6 +525,7 @@ def _solve_tm_coefficients(
     continuity_orders: int,
     r_inner: np.ndarray,
     w_inner: np.ndarray,
+    sign_prefactor: float,
 ) -> tuple[np.ndarray, Dict]:
     """
     求解 TM 系数 a_{2i}
@@ -536,6 +551,8 @@ def _solve_tm_coefficients(
         连续性阶数
     r_inner, w_inner : np.ndarray
         内区网格和权重
+    sign_prefactor : float
+        rc 处 AE 轨道的符号，用于保证伪轨道在节点后的符号一致
 
     Returns
     -------
@@ -547,7 +564,7 @@ def _solve_tm_coefficients(
     # 定义残差函数
     def residuals(a):
         # 计算 TM 轨道在 rc 处的值
-        derivs_ps = _eval_tm_at_rc(rc, l, a)
+        derivs_ps = _eval_tm_at_rc(rc, l, a, sign_prefactor)
 
         # 匹配导数
         res = []
@@ -627,6 +644,25 @@ def _solve_tm_coefficients(
     except Exception as e:
         mesg = f"Fallback 3 failed: {e}"
 
+    # Fallback 4: 使用 least_squares (更稳健)
+    try:
+        res_ls = least_squares(
+            residuals,
+            a_init,
+            method='trf',  # Trust Region Reflective
+            ftol=1e-8,     # 放宽公差以避免过度迭代
+            xtol=1e-8,
+            gtol=1e-8,
+            max_nfev=3000
+        )
+        # 即使 success=False，如果 cost 极小也视为成功
+        if res_ls.success or res_ls.cost < 1e-15:
+            return res_ls.x, {'ier': 1, 'nfev': res_ls.nfev, 'mesg': 'least_squares success (or low cost)', 'fallback': True}
+        else:
+            mesg = f"Fallback 4 failed: cost={res_ls.cost}"
+    except Exception as e:
+        mesg = f"Fallback 4 failed: {e}"
+
     # 所有尝试失败
     raise RuntimeError(
         f"TM 系数求解失败（所有fallback策略均失败）: {mesg}\n"
@@ -640,6 +676,7 @@ def _splice_orbital(
     a_coeff: np.ndarray,
     l: int,
     i_rc: int,
+    sign_prefactor: float = 1.0,
 ) -> np.ndarray:
     """
     拼接内外区生成完整伪轨道
@@ -659,6 +696,8 @@ def _splice_orbital(
         角动量
     i_rc : int
         rc 对应的网格索引
+    sign_prefactor : float
+        rc 处 AE 轨道的符号，确保拼接时符号一致
 
     Returns
     -------
@@ -676,7 +715,7 @@ def _splice_orbital(
     # 防止指数溢出（裁剪到安全范围）
     p = np.clip(p, -700, 700)
 
-    u_ps[:i_rc+1] = r_inner**(l+1) * np.exp(p)
+    u_ps[:i_rc+1] = sign_prefactor * r_inner**(l+1) * np.exp(p)
 
     # 外区：保持 AE 轨道不变（已经复制）
 
@@ -689,6 +728,7 @@ def _check_continuity(
     a_coeff: np.ndarray,
     derivs_ae: np.ndarray,
     order: int,
+    sign_prefactor: float = 1.0,
 ) -> Dict:
     """
     检查内外区连续性（使用解析导数）
@@ -705,6 +745,8 @@ def _check_continuity(
         AE 轨道在 rc 处的导数 [u, u', u'', ...]
     order : int
         检查到几阶导数
+    sign_prefactor : float
+        AE 轨道在 rc 处的符号
 
     Returns
     -------
@@ -712,7 +754,7 @@ def _check_continuity(
         包含各阶导数的相对误差
     """
     # 计算 TM 轨道在 rc 处的解析导数
-    derivs_ps = _eval_tm_at_rc(rc, l, a_coeff)
+    derivs_ps = _eval_tm_at_rc(rc, l, a_coeff, sign_prefactor)
 
     result = {}
     labels = ['u', 'du', 'd2u', 'd3u', 'd4u']
