@@ -55,7 +55,7 @@ def main():
         ae.u_by_l[0][-1],  # 3s价电子
         ae.eps_by_l[0][-1],
         l=0,
-        rc=2.5  # 最优参数（基于M5实验）
+        rc=2.5  # 推荐范围 2.0-2.5
     )
     print(f"  ✓ 范数误差: {tm_s.norm_error:.3e}")
 
