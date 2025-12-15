@@ -27,6 +27,7 @@ extensions = [
     "sphinx.ext.coverage",
     "sphinx_autodoc_typehints",
     "myst_parser",
+    "nbsphinx",
 ]
 
 # Napoleon settings (for Google/NumPy style docstrings)
@@ -72,11 +73,11 @@ language = "zh_CN"
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 html_theme_options = {
-    "navigation_depth": 4,
-    "collapse_navigation": False,
+    "navigation_depth": 3,
+    "collapse_navigation": True,
     "sticky_navigation": True,
     "includehidden": True,
-    "titles_only": False,
+    "titles_only": True,
 }
 
 # -- Options for LaTeX/PDF output --------------------------------------------
@@ -99,7 +100,7 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
     "scipy": ("https://docs.scipy.org/doc/scipy/", None),
-    "atomscf": ("https://bud-primordium.github.io/Computational-Physics-Fall-2024/", None),
+    # "atomscf": ("...", None),  # AtomSCF 暂无可用的 objects.inv，先注释以避免构建告警
 }
 
 # MyST parser settings (for Markdown support)
@@ -113,3 +114,8 @@ myst_enable_extensions = [
     "smartquotes",
     "replacements",
 ]
+
+# nbsphinx settings (for Jupyter Notebook integration)
+nbsphinx_execute = "never"
+nbsphinx_allow_errors = True
+nbsphinx_codecell_lexer = "ipython3"

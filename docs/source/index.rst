@@ -4,26 +4,28 @@ AtomPPGen 文档
 模守恒赝势生成器 - 基于 Troullier-Martins 方法的教学实现
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: 目录
 
    introduction
    algorithm/index
    api/index
-   examples/index
+   tutorials/index
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: 用户指南
 
    user_guide/parameter_selection
    user_guide/validation_standards
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: 实验结果
 
    results/al_lda_validation
+   results/si_lda_validation
+   results/na_lda_validation
 
 简介
 ----

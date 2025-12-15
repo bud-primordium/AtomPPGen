@@ -62,7 +62,7 @@
 
 4. **Kleinman-Bylander 可分离形式**
 
-   - 选择局域通道 :math:`V_{\text{loc}}`（推荐 d）
+   - 选择局域通道 :math:`V_{\text{loc}}` （推荐 d）
    - 构造投影子：
 
      .. math::
