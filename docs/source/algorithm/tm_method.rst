@@ -43,6 +43,22 @@ Troullier-Martins 伪化方法
 - 指数形式 :math:`\exp(p(r))` 保证正定性
 - 偶次幂 :math:`r^{2i}` 保证光滑性（所有导数在原点连续）
 
+为什么选择指数形式？
+~~~~~~~~~~~~~~~~~~~~
+
+TM 方法选择 :math:`u(r) = r^{l+1} \exp(\sum a_{2i} r^{2i})` 而不是简单多项式，有三个原因：
+
+1. **正定性**：:math:`\exp(\cdot) > 0`，保证内区无节点。
+   多项式可能有零点，导致非物理的节点。
+
+2. **解析性**：偶次幂 :math:`r^{2i}` 保证所有导数在 :math:`r=0` 连续。
+   如果包含奇次幂，奇数阶导数在原点会有奇异性。
+
+3. **柔性**：指数的参数空间比多项式更“平坦”，非线性方程组更容易收敛。
+
+**直观理解**：伪波函数在内区的形状像一个“隆起”——在原点是零（因为 :math:`r^{l+1}`），
+向外先上升后下降，最终在 :math:`r_c` 处平滑接到真实波函数。
+
 TM 方法
 -------
 
@@ -55,7 +71,7 @@ TM 方法
 
    u_{\text{PS}}^{(k)}(r_c) = u_{\text{AE}}^{(k)}(r_c), \quad k = 0, 1, 2, \ldots, 2N-1
 
-原始 TM 方法使用 :math:`N=3`（6 个约束），我们简化为 :math:`N=2`（4 个约束）：
+原始 TM 方法使用 :math:`N=3` （6 个约束），我们简化为 :math:`N=2` （4 个约束）：
 
 - 函数值匹配：:math:`u(r_c)`
 - 一阶导数匹配：:math:`u'(r_c)`
@@ -71,15 +87,15 @@ TM 方法
 
 .. math::
 
-   u(r) &= r^{l+1} e^{p(r)} \\\\
-   u'(r) &= \left[(l+1) r^l + r^{l+1} p'(r)\right] e^{p(r)} \\\\
+   u(r) &= r^{l+1} e^{p(r)} \\
+   u'(r) &= \left[(l+1) r^l + r^{l+1} p'(r)\right] e^{p(r)} \\
    u''(r) &= \left[l(l+1) r^{l-1} + 2(l+1) r^l p'(r) + r^{l+1} (p'^2(r) + p''(r))\right] e^{p(r)}
 
 其中：
 
 .. math::
 
-   p'(r) &= \sum_{i=1}^N 2i \, a_{2i} r^{2i-1} \\\\
+   p'(r) &= \sum_{i=1}^N 2i \, a_{2i} r^{2i-1} \\
    p''(r) &= \sum_{i=1}^N 2i(2i-1) a_{2i} r^{2i-2}
 
 范数积分
@@ -100,12 +116,12 @@ TM 方法
 
 .. math::
 
-   F_1 &= u_{\text{PS}}(r_c) - u_{\text{AE}}(r_c) \\\\
-   F_2 &= u'_{\text{PS}}(r_c) - u'_{\text{AE}}(r_c) \\\\
-   F_3 &= u''_{\text{PS}}(r_c) - u''_{\text{AE}}(r_c) \\\\
+   F_1 &= u_{\text{PS}}(r_c) - u_{\text{AE}}(r_c) \\
+   F_2 &= u'_{\text{PS}}(r_c) - u'_{\text{AE}}(r_c) \\
+   F_3 &= u''_{\text{PS}}(r_c) - u''_{\text{AE}}(r_c) \\
    F_4 &= Q_{\text{PS}} - Q_{\text{AE}}
 
-求解 :math:`\mathbf{F}(\mathbf{a}) = \mathbf{0}`，使用 **scipy.optimize.fsolve**（混合 Powell 算法）。
+求解 :math:`\mathbf{F}(\mathbf{a}) = \mathbf{0}`，使用 **scipy.optimize.fsolve** （混合 Powell 算法）。
 
 数值实现
 --------
@@ -117,7 +133,7 @@ TM 方法
 
 .. math::
 
-   a_0 &\approx \ln\left(\frac{u_{\text{AE}}(r_c)}{r_c^{l+1}}\right) \\\\
+   a_0 &\approx \ln\left(\frac{u_{\text{AE}}(r_c)}{r_c^{l+1}}\right) \\
    a_{2i} &= 0, \quad i = 1, 2, 3
 
 内外区拼接
@@ -156,7 +172,7 @@ TM 方法
 ------------
 
 伪代码框架
-~~~~~~
+~~~~~~~~~~
 
 .. code-block:: python
 

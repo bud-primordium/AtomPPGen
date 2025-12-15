@@ -33,8 +33,8 @@ TM 伪化方法通过非线性方程组隐式保证范数守恒。验证时提�
 对数导数匹配
 ------------
 
-物理意义
-~~~~~~~~
+对数导数的物理意义
+~~~~~~~~~~~~~~~~~~
 
 对数导数（Logarithmic Derivative）:math:`L(E, r)` 描述散射性质在能量窗口内的
 变化，是可转移性的核心指标：
@@ -43,6 +43,45 @@ TM 伪化方法通过非线性方程组隐式保证范数守恒。验证时提�
 
    L(E, r) = r \frac{\partial \ln \psi(E, r)}{\partial r} = r \frac{\psi'(E, r)}{\psi(E, r)}
 
+为什么它能反映散射相移？
+
+当 :math:`r` 选在核外（对赝势而言通常取 :math:`r \gtrsim r_c`）时，
+径向散射解可以写成带相移 :math:`\delta_l(E)` 的渐近形式（忽略长程库仑修正时）：
+
+.. math::
+
+   u_l(r) \propto \sin\bigl(kr - l\pi/2 + \delta_l(E)\bigr), \quad k = \sqrt{2E}
+
+代入 :math:`L(E,r) = r u'(r)/u(r)` 得到
+
+.. math::
+
+   L_l(E, r) = kr\,\cot\bigl(kr - l\pi/2 + \delta_l(E)\bigr)
+
+因此在固定 :math:`r=r_{\text{test}}` 下，:math:`L_l(E)` 与 :math:`\delta_l(E)` 一一对应
+（本质上是把“相位信息”映射成“斜率/幅度比”的能量函数）。这就是为什么比较
+AE 与 PS 的 :math:`L(E)` 曲线，等价于比较它们在该能量窗口内的散射相移。
+
+为什么用 :math:`L(E)` 而不是直接算 :math:`\delta_l(E)`？
+
+- :math:`L(E)` 只需要在一个有限半径处取 :math:`u'/u`，不依赖波函数归一化，数值上更稳健。
+- 直接求 :math:`\delta_l(E)` 往往需要更“远场”的渐近拟合，并且要处理相位的 :math:`\pi` 分支问题；
+  在教学实现里，用 :math:`L(E)` 作为中间量更直接。
+
+“零点”为什么有用？
+
+AtomPPGen 在评价指标中使用的是 :math:`L(E)` 的 **过零点** (:math:`L=0`) 位置。
+由上式可知，:math:`L=0 \iff \cot(\cdots)=0`，也就是相位满足
+
+.. math::
+
+   kr_{\text{test}} - l\pi/2 + \delta_l(E) = \left(n + \tfrac{1}{2}\right)\pi
+
+这是一条“量子化条件”：它把连续的相移信息离散化成一串能量刻度。
+如果赝势在某个能量附近的散射行为（相移）出现偏差，过零点会整体平移；
+而在相移随能量快速变化的区域（常见于准束缚/共振特征附近），过零点位置尤其敏感。
+因此，比较过零点能量的偏差是一种紧凑而有效的可转移性指标。
+
 在测试半径 :math:`r_{\text{test}}` 处（通常选取 :math:`r_{\text{test}} = \max(r_c^l) + 0.5` a₀），
 扫描能量窗口 :math:`E \in [-0.25, +0.25]` Ha（对应 [-0.5, +0.5] Ry），比较
 全电子和赝势的 :math:`L(E)` 曲线。
@@ -50,9 +89,9 @@ TM 伪化方法通过非线性方程组隐式保证范数守恒。验证时提�
 评价指标
 ~~~~~~~~
 
-1. **零点均方根偏差**（Zero-Crossing RMS）
+1. **零点均方根偏差** （Zero-Crossing RMS）
 
-   对数导数的零点对应散射共振能量。匹配零点位置确保赝势在不同化学环境下
+   对数导数的零点对应固定相位条件（可视为散射相移的离散刻度）。匹配零点位置确保赝势在不同化学环境下
    散射行为一致：
 
    .. math::
@@ -61,7 +100,13 @@ TM 伪化方法通过非线性方程组隐式保证范数守恒。验证时提�
 
    **验收阈值**：:math:`\Delta E_{\text{RMS}} < 0.025` Ha (:math:`\approx 0.05` Ry)
 
-2. **曲线均方根差异**（Curve RMS）
+   **实现细节（重要）**：
+
+   在当前教学实现中，只有当扫描窗口内 AE/PS 都至少出现 2 个过零点时，才会计算并启用零点 RMS 判据。
+   若零点数量不足（常见于某些通道/某些 :math:`r_{\text{test}}` 选择），零点 RMS 记为 N/A，不参与通过判定，
+   此时主要依据价区曲线 RMS 进行评估。
+
+2. **曲线均方根差异** （Curve RMS）
 
    整体形状匹配度：
 
@@ -71,8 +116,8 @@ TM 伪化方法通过非线性方程组隐式保证范数守恒。验证时提�
 
    **验收阈值（元素类型差异化）**：
 
-   - **金属元素**（Al, Na, Mg）：:math:`L_{\text{RMS}}^{\text{valence}} < 16.0`
-   - **共价元素**（Si, C, N）：:math:`L_{\text{RMS}}^{\text{valence}} < 0.3`
+   - **金属元素** （Al, Na, Mg）：:math:`L_{\text{RMS}}^{\text{valence}} < 16.0`
+   - **共价元素** （Si, C, N）：:math:`L_{\text{RMS}}^{\text{valence}} < 3.0`
 
    其中 :math:`L_{\text{RMS}}^{\text{valence}}` 为价区窗口 :math:`E \in [-0.05, +0.05]` Ha 内的曲线 RMS。
 
@@ -189,8 +234,8 @@ KS 有效势提取
 1. 对 :math:`H_l` 进行厄米对角化（``scipy.linalg.eigh``）
 2. 筛选束缚态：
 
-   - 能量 :math:`E < E_{\text{max}}`（默认 0 Ha）
-   - 波函数边界条件：:math:`|\psi(r_{\text{max}})| < 0.1 \cdot \max |\psi|`（**盒态过滤**）
+   - 能量 :math:`E < E_{\text{max}}` （默认 0 Ha）
+   - 波函数边界条件：:math:`\left|\psi(r_{\text{max}})\right| < 0.1 \cdot \max_r \left|\psi(r)\right|` （盒态过滤）
 
 3. 识别幽灵态：
 
@@ -214,16 +259,16 @@ KS 有效势提取
 
 仅基于 :math:`\tau` 无法区分危险幽灵态与安全的 Rydberg 激发态。改进判据如下：
 
-1. **正能散射态**（:math:`E > 0`）：
+1. **正能散射态** （:math:`E > 0`）：
 
    连续谱在有限盒子中的离散化产物，数学上非真正束缚态，归为盒态。
 
-2. **Rydberg 激发态**（:math:`0 > E > \varepsilon_{\text{valence}} - \delta`）：
+2. **Rydberg 激发态** （:math:`0 > E > \varepsilon_{\text{valence}} - \delta`）：
 
    高主量子数束缚态序列（如 Al 的 4s, 5s, 6s...），能量趋于电离阈值 0 Ha。
    这些态位于价电子能级之上，距离费米能级较远，对基态 DFT 计算无影响，归为安全态。
 
-3. **潜在危险幽灵态**（:math:`E < \varepsilon_{\text{valence}} - \delta`）：
+3. **潜在危险幽灵态** （:math:`E < \varepsilon_{\text{valence}} - \delta`）：
 
    能量显著低于价态的额外束缚态，可能占据基态，导致错误电子结构。
    需进一步用 :math:`\tau` 判据区分真幽灵态与盒态。
@@ -236,7 +281,7 @@ Rydberg 激发态的存在证明赝势保留了正确的长程库仑行为（:ma
 将这些态误判为幽灵态会导致对赝势质量的错误评估。能量感知分类确保只标记
 真正危险的态（价态下方的非物理束缚态）。
 
-**验收标准**：真幽灵态数量 :math:`N_{\text{ghost}} \leq 10`（TM 伪化产生的浅幽灵态
+**验收标准**：真幽灵态数量 :math:`N_{\text{ghost}} \leq 10` （TM 伪化产生的浅幽灵态
 能量接近 0，对基态 DFT 影响有限）。
 
 **数值优化**：
