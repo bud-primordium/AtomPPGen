@@ -400,6 +400,51 @@ class TestUnifiedExportInterface:
         assert files[0].parent.name == 'subdir'
 
 
+class TestUPFExport:
+    """测试 UPF 导出（实验性，最小可解析结构）"""
+
+    @pytest.mark.unit
+    def test_upf_export_semilocal_minimal(self, al_s_data, tmp_path):
+        data = al_s_data
+        output_prefix = tmp_path / "test_al"
+
+        files = export_pseudopotential(
+            ae_result=data["ae"],
+            tm_dict=data["tm_dict"],
+            inv_dict=data["inv_dict"],
+            validation_report=data["report"],
+            output_prefix=str(output_prefix),
+            formats=["upf"],
+            metadata={"z_valence": 3.0},
+        )
+
+        assert len(files) == 1
+        upf_file = files[0]
+        assert upf_file.exists()
+        assert upf_file.suffix == ".upf"
+
+        # XML 可解析性（UPF v2 最小结构）
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(upf_file)
+        root = tree.getroot()
+        assert root.tag == "UPF"
+
+        header = root.find("PP_HEADER")
+        assert header is not None
+        assert header.attrib.get("element") == "Al"
+        assert header.attrib.get("units") == "bohr_ry"
+
+        mesh = root.find("PP_MESH")
+        assert mesh is not None
+        assert mesh.find("PP_R") is not None
+        assert mesh.find("PP_RAB") is not None
+
+        # s-only fixture 未提供 KBResult，应落在半局域分支
+        assert root.find("PP_SEMILOCAL") is not None
+        assert root.find("PP_NONLOCAL") is None
+
+
 class TestHelperFunctions:
     """测试辅助函数"""
 

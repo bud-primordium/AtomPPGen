@@ -125,6 +125,27 @@ export - 赝势导出模块
        }
    )
 
+UPF 导出（实验性）
+~~~~~~~~~~~~~~~~~
+
+UPF writer 当前提供“最小可解析、字段可追溯”的结构，用于后续逐步对齐 QE 的严格要求。
+建议仍以 JSON/NPZ 作为权威数据源，UPF 视为中间格式。
+
+导出 UPF 时需要提供价电子数 ``z_valence``（教学示例可用 Na/Al/Si 的默认推断，但推荐显式指定）：
+
+.. code-block:: python
+
+   files = export_pseudopotential(
+       ae_result=ae,
+       tm_dict=tm_dict,
+       inv_dict=inv_dict,
+       validation_report=report,
+       output_prefix='outputs/al_lda',
+       kb_result=kb,  # 建议提供，以输出 PP_LOCAL/PP_NONLOCAL
+       formats=['upf'],
+       metadata={'z_valence': 3.0},
+   )
+
 加载导出数据
 ~~~~~~~~~~~~
 
@@ -262,6 +283,15 @@ NPZ 文件采用压缩格式（``np.savez_compressed``），包含以下数组�
 
 - ``ps_wavefunction_l{l}``：伪波函数 :math:`u_{\mathrm{PS}}(r)`
 - ``semilocal_potential_l{l}``：半局域势 :math:`V_l(r)` (Ha)
+
+**KB 可分离形式数据**（可选）：
+
+如果在导出时传入 ``kb_result``，NPZ 还会包含 KB 形式所需的关键数组：
+
+- ``kb_loc_channel``：局域通道 :math:`l^*`
+- ``kb_V_loc``：局域势 :math:`V_{\mathrm{loc}}(r)` (Ha)
+- ``kb_beta_l{l}``：投影子 :math:`\beta_l(r)`（仅对非局域通道存在）
+- ``kb_D_l{l}``：耦合系数 :math:`D_l` (Ha)
 
 命名约定示例：
 

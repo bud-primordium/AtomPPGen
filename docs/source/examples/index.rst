@@ -21,33 +21,61 @@
    print(f"3s 能级: {ae_result.eps_by_l[0][2]:.6f} Ha")
    print(f"总能量: {ae_result.energies['E_total']:.6f} Ha")
 
-完整工作流（待实现）
-~~~~~~~~~~~~~~~~~~~~
+完整工作流（Al, LDA）
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
    from atomppgen import (
        solve_ae_atom,
        tm_pseudize,
-       invert_potential,
+       invert_semilocal_potential,
        kb_transform,
        export_pseudopotential,
    )
+   from atomppgen.validate import run_full_validation
 
    # 1. 全电子解
-   ae = solve_ae_atom(Z=13, xc="PZ81", lmax=2)
+   ae = solve_ae_atom(Z=13, xc="PZ81", lmax=2, spin_mode="LDA")
 
-   # 2. TM 伪化（待实现）
-   # tm_s = tm_pseudize(r=ae.r, w=ae.w, v_ae=ae.u_by_l[0][2], ...)
+   # 2. TM 伪化（示例：取每个通道能量最高的参考态）
+   rc_map = {0: 2.1, 1: 2.2, 2: 2.4}
+   tm_results = {}
+   for l, rc in rc_map.items():
+       tm_results[l] = tm_pseudize(
+           r=ae.r,
+           w=ae.w,
+           u_ae=ae.u_by_l[l][-1],
+           eps=ae.eps_by_l[l][-1],
+           l=l,
+           rc=rc,
+           continuity_orders=4,
+       )
 
-   # 3. 势反演（待实现）
-   # inv_s = invert_potential(r=ae.r, v_ps=tm_s.v_ps, ...)
+   # 3. 势反演
+   inv_results = {l: invert_semilocal_potential(tm_results[l], ae.r) for l in tm_results}
 
-   # 4. KB 转换（待实现）
-   # kb = kb_transform(V_by_l={...}, ...)
+   # 4. KB 转换（选择 d 通道作为局域道）
+   kb = kb_transform(
+       invert_results=inv_results,
+       u_by_l={l: tm_results[l].u_ps for l in tm_results},
+       r=ae.r,
+       w=ae.w,
+       loc_channel=2,
+   )
 
-   # 5. 导出（待实现）
-   # export_pseudopotential("al_lda.json", ...)
+   # 5. 验证
+   report = run_full_validation(ae, tm_results, inv_results, r_test=3.0)
+
+   # 6. 导出
+   export_pseudopotential(
+       ae_result=ae,
+       tm_dict=tm_results,
+       inv_dict=inv_results,
+       validation_report=report,
+       output_prefix="outputs/al_lda_tm",
+       formats=["json", "npz"],
+   )
 
 常见使用模式
 ------------

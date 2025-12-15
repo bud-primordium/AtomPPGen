@@ -4,7 +4,7 @@
 提供多种格式的赝势文件导出功能：
 - JSON：结构化元数据（参数、验证结果）
 - NPZ：数值数据（径向网格、势能、波函数）
-- UPF：Quantum ESPRESSO 兼容格式（实验性）
+- UPF：Quantum ESPRESSO 兼容格式（实验性，当前仅提供最小可解析结构）
 
 主要函数
 --------
@@ -17,16 +17,19 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Union
 from datetime import datetime
+import xml.etree.ElementTree as ET
 
 from atomppgen.ae_atom import AEAtomResult
 from atomppgen.tm import TMResult
 from atomppgen.invert import InvertResult
+from atomppgen.kb import KBResult
 from atomppgen.validate import ValidationReport
 
 
 __all__ = [
     "PseudopotentialData",
     "export_pseudopotential",
+    "export_upf",
 ]
 
 
@@ -62,6 +65,14 @@ class PseudopotentialData:
         赝波函数（伪化后的价电子态）
     semilocal_potentials_by_l : Dict[int, np.ndarray]
         半局域势 V_l(r)，单位 Hartree
+    kb_loc_channel : Optional[int]
+        KB 局域通道角动量量子数 l*（可选）
+    kb_V_loc : Optional[np.ndarray]
+        KB 局域势 V_loc(r)，单位 Hartree（可选）
+    kb_beta_l : Optional[Dict[int, np.ndarray]]
+        KB 投影子 {l: β_l(r)}（可选，已归一化）
+    kb_D_l : Optional[Dict[int, float]]
+        KB 耦合系数 {l: D_l}（可选，Hartree）
     validation_report : ValidationReport
         完整验证报告
     generation_date : str
@@ -84,6 +95,10 @@ class PseudopotentialData:
     semilocal_potentials_by_l: Dict[int, np.ndarray]
     validation_report: ValidationReport
     generation_date: str
+    kb_loc_channel: Optional[int] = None
+    kb_V_loc: Optional[np.ndarray] = None
+    kb_beta_l: Optional[Dict[int, np.ndarray]] = None
+    kb_D_l: Optional[Dict[int, float]] = None
     code_version: str = "0.1.0"
     git_commit: Optional[str] = None
 
@@ -147,6 +162,13 @@ def _export_json(
         },
         "validation_report": data.validation_report.to_dict(),
     }
+
+    if data.kb_V_loc is not None:
+        json_data["pseudopotential"]["kb"] = {
+            "loc_channel": int(data.kb_loc_channel) if data.kb_loc_channel is not None else None,
+            "nonlocal_channels": sorted(int(l) for l in (data.kb_beta_l or {}).keys()),
+            "note": "KB arrays (V_loc, beta_l, D_l) are stored in NPZ",
+        }
 
     # 可选：包含git commit
     if data.git_commit:
@@ -237,6 +259,18 @@ def _export_npz(
     for l, V in data.semilocal_potentials_by_l.items():
         npz_data[f'semilocal_potential_l{l}'] = V
 
+    # KB 数据（可选）
+    if data.kb_V_loc is not None:
+        npz_data["kb_V_loc"] = data.kb_V_loc
+        if data.kb_loc_channel is not None:
+            npz_data["kb_loc_channel"] = int(data.kb_loc_channel)
+        if data.kb_beta_l:
+            for l, beta in data.kb_beta_l.items():
+                npz_data[f"kb_beta_l{int(l)}"] = beta
+        if data.kb_D_l:
+            for l, D in data.kb_D_l.items():
+                npz_data[f"kb_D_l{int(l)}"] = float(D)
+
     # 确保输出目录存在
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -267,12 +301,160 @@ def _xc_to_code(xc_functional: str) -> int:
     return xc_map.get(xc_functional.upper(), 0)
 
 
+def _infer_z_valence(Z: int) -> Optional[float]:
+    """
+    尽量推断常见元素的价电子数（用于 UPF header）。
+
+    Notes
+    -----
+    这是教学用途的保守映射。更严格的做法应由“芯态选择/价电子配置”显式给出。
+    """
+    mapping = {
+        11: 1.0,  # Na: 3s^1
+        13: 3.0,  # Al: 3s^2 3p^1
+        14: 4.0,  # Si: 3s^2 3p^2
+    }
+    return mapping.get(int(Z))
+
+
+def _format_float_array(values: np.ndarray, per_line: int = 6) -> str:
+    values = np.asarray(values).ravel()
+    lines = []
+    for i in range(0, len(values), per_line):
+        chunk = values[i:i + per_line]
+        lines.append(" ".join(f"{float(x):.12e}" for x in chunk))
+    return "\n".join(lines)
+
+
+def export_upf(
+    data: PseudopotentialData,
+    output_path: Union[str, Path],
+    metadata: Optional[Dict] = None,
+) -> Path:
+    """
+    导出 UPF v2（实验性）
+
+    当前目标是提供“最小可解析、字段可追溯”的 UPF 结构，便于后续逐步对齐 QE 的严格要求。
+    若要获得严格可用于 Quantum ESPRESSO 的 UPF，请关注后续版本更新。
+
+    Parameters
+    ----------
+    data : PseudopotentialData
+        完整赝势数据包
+    output_path : str | Path
+        输出文件路径（建议后缀为 .upf）
+    metadata : dict, optional
+        额外信息；UPF 需要的关键字段可在此给出：
+        - z_valence : float（建议显式提供）
+
+    Returns
+    -------
+    Path
+        生成的 UPF 文件路径
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _export_upf(data, output_path, metadata=metadata)
+    return output_path
+
+
+def _export_upf(
+    data: PseudopotentialData,
+    output_path: Path,
+    metadata: Optional[Dict] = None,
+) -> None:
+    z_valence = None
+    if metadata and metadata.get("z_valence") is not None:
+        z_valence = float(metadata["z_valence"])
+    else:
+        z_valence = _infer_z_valence(int(data.Z))
+
+    if z_valence is None:
+        raise ValueError("UPF 导出需要提供 z_valence（可在 metadata['z_valence'] 指定）")
+
+    # UPF 传统上使用 Ry 能量单位（1 Ha = 2 Ry）
+    ha_to_ry = 2.0
+
+    r = np.asarray(data.radial_grid, dtype=float)
+    rab = np.gradient(r)
+
+    root = ET.Element("UPF", {"version": "2.0.1"})
+
+    info = ET.SubElement(root, "PP_INFO")
+    info.text = (
+        "Generated by AtomPPGen (experimental UPF writer).\n"
+        "This file is intended to be a traceable intermediate format; QE compatibility is not guaranteed yet."
+    )
+
+    ET.SubElement(
+        root,
+        "PP_HEADER",
+        {
+            "generated": "AtomPPGen",
+            "element": str(data.symbol),
+            "pseudo_type": "NC",
+            "relativistic": "nonrelativistic",
+            "functional": str(data.xc_functional),
+            "z_valence": f"{z_valence:.1f}",
+            "l_max": str(int(max(data.semilocal_potentials_by_l.keys())) if data.semilocal_potentials_by_l else 0),
+            "mesh_size": str(int(len(r))),
+            "has_kb": "T" if data.kb_V_loc is not None else "F",
+            "units": "bohr_ry",
+        },
+    )
+
+    mesh = ET.SubElement(root, "PP_MESH")
+    pp_r = ET.SubElement(mesh, "PP_R")
+    pp_r.text = _format_float_array(r)
+    pp_rab = ET.SubElement(mesh, "PP_RAB")
+    pp_rab.text = _format_float_array(rab)
+
+    if data.kb_V_loc is not None and data.kb_beta_l is not None and data.kb_D_l is not None:
+        pp_local = ET.SubElement(root, "PP_LOCAL")
+        pp_local.text = _format_float_array(np.asarray(data.kb_V_loc) * ha_to_ry)
+
+        nonlocal_el = ET.SubElement(root, "PP_NONLOCAL")
+        beta_items = sorted((int(l), np.asarray(beta)) for l, beta in data.kb_beta_l.items())
+        dij_diag = []
+        for idx, (l, beta) in enumerate(beta_items, start=1):
+            beta_el = ET.SubElement(
+                nonlocal_el,
+                "PP_BETA",
+                {
+                    "index": str(idx),
+                    "angular_momentum": str(int(l)),
+                    "cutoff_radius_index": "0",
+                },
+            )
+            beta_el.text = _format_float_array(beta)
+
+            D = float(data.kb_D_l[int(l)])
+            dij_diag.append(D * ha_to_ry)
+
+        dij_el = ET.SubElement(nonlocal_el, "PP_DIJ")
+        nproj = len(dij_diag)
+        dij_matrix = np.zeros((nproj, nproj), dtype=float)
+        for i in range(nproj):
+            dij_matrix[i, i] = dij_diag[i]
+        dij_el.text = _format_float_array(dij_matrix.ravel(), per_line=6)
+
+    else:
+        semilocal = ET.SubElement(root, "PP_SEMILOCAL")
+        for l in sorted(int(k) for k in data.semilocal_potentials_by_l.keys()):
+            vl = ET.SubElement(semilocal, "PP_VL", {"angular_momentum": str(int(l))})
+            vl.text = _format_float_array(np.asarray(data.semilocal_potentials_by_l[l]) * ha_to_ry)
+
+    tree = ET.ElementTree(root)
+    tree.write(output_path, encoding="utf-8", xml_declaration=True)
+
+
 def export_pseudopotential(
     ae_result: AEAtomResult,
     tm_dict: Dict[int, TMResult],
     inv_dict: Dict[int, InvertResult],
     validation_report: ValidationReport,
     output_prefix: str,
+    kb_result: Optional[KBResult] = None,
     formats: List[str] = ['json', 'npz'],
     metadata: Optional[Dict] = None,
 ) -> List[Path]:
@@ -344,6 +526,10 @@ def export_pseudopotential(
         ae_wavefunctions_by_l=ae_result.u_by_l,
         pseudo_wavefunctions_by_l={l: tm.u_ps for l, tm in tm_dict.items()},
         semilocal_potentials_by_l={l: inv.V_l for l, inv in inv_dict.items()},
+        kb_loc_channel=kb_result.loc_channel if kb_result is not None else None,
+        kb_V_loc=kb_result.V_loc if kb_result is not None else None,
+        kb_beta_l=kb_result.beta_l if kb_result is not None else None,
+        kb_D_l=kb_result.D_l if kb_result is not None else None,
         validation_report=validation_report,
         generation_date=datetime.now().isoformat(),
         code_version="0.1.0",
@@ -366,8 +552,9 @@ def export_pseudopotential(
             output_files.append(npz_path)
 
         elif fmt.lower() == 'upf':
-            # UPF格式暂未实现
-            print(f"警告：UPF格式暂未实现，跳过")
+            upf_path = output_prefix.with_suffix('.upf')
+            export_upf(pp_data, upf_path, metadata=metadata)
+            output_files.append(upf_path)
 
         else:
             print(f"警告：未知格式 '{fmt}'，跳过")
