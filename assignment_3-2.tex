@@ -1,0 +1,714 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{physics}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{listings}
+\usepackage{subcaption}
+
+\usepackage{fontspec}
+\setmainfont{STSong}
+\setsansfont{PingFang SC}
+\setmonofont{Menlo}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    citecolor=black,
+    breaklinks=true
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    numbers=left,
+    numberstyle=\tiny\color{gray}
+}
+
+\title{\vspace{-1cm}AtomPPGen：模守恒赝势的生成、KB 形式与可转移性验证}
+\author{杨远青 \quad 学号：22300190015}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{问题描述}
+
+平面波基组密度泛函理论（Density Functional Theory, DFT）在固体与材料计算中应用广泛，但其直接处理原子核附近的
+强库仑势会导致价电子波函数在近核区域强烈振荡，从而需要极高的平面波截断能量，计算代价昂贵。
+赝势（pseudopotential）的核心思想是将核附近的快速振荡用一个在近核区平滑的有效势替代，同时保持价电子在核外区域的散射性质与能级结构，
+从而显著降低平面波基组规模。
+
+本作业围绕 \textbf{AtomPPGen} 项目展开：该项目实现了模守恒（Norm-Conserving, NC）赝势生成的一个教学级工作流，
+包括 Troullier--Martins（TM）伪化、半局域势反演、Kleinman--Bylander（KB）可分离非局域形式构造，以及可转移性验证工具
+（范数守恒、对数导数匹配、幽灵态检测）。
+项目在线文档：\href{https://bud-primordium.github.io/AtomPPGen/}{bud-primordium.github.io/AtomPPGen/}。
+
+本文系统说明：
+\begin{enumerate}
+    \item 模守恒赝势的理论动机与基本条件；
+    \item TM 伪化、势反演与 KB 变换的数学形式与数值实现要点；
+    \item AtomPPGen 与其依赖 AtomSCF 的程序结构与数据流；
+    \item 以 Al（LDA）为主的验证结果（范数误差、对数导数指标、幽灵态分类），并简述 Si、Na 的对比案例；
+    \item 与 NIST 原子数据的对比与主要误差来源讨论。
+\end{enumerate}
+
+本文中所有能量均采用 Hartree 原子单位（Ha），径向坐标采用 Bohr 半径（$a_0$）。
+
+\section{理论基础}
+
+\subsection{模守恒赝势概述}
+
+\subsubsection{为什么需要赝势}
+
+对原子核的库仑吸引势 $-Z/r$ 会使全电子（All-Electron, AE）价层波函数在近核区域具有很大曲率，并伴随正交化条件导致的节点结构。
+在平面波表示中，近核振荡对应大量高频分量，从而需要高截断能量 $E_{\mathrm{cut}}$ 才能准确描述。
+赝势方法用一个在 $r \le r_c$ 内平滑的势 $V_{\mathrm{PS}}(r)$ 替代真实势的核附近部分，使价电子波函数在核附近无节点、连续可微，
+同时在核外区域保持与 AE 解一致，从而降低基组需求。
+
+\subsubsection{模守恒（Norm Conservation）条件}
+
+对每个角动量通道 $l$，给定一个参考价态（通常是该通道的最外层占据态）
+的 AE 径向规约波函数 $u_{\mathrm{AE}}(r)$ 与能量 $\varepsilon_l$，
+模守恒赝势要求构造伪径向函数 $u_{\mathrm{PS}}(r)$，满足：
+\begin{enumerate}
+    \item \textbf{核外一致性}：在截断半径 $r_c$ 外，伪波函数与 AE 波函数完全一致
+          \begin{equation}
+              u_{\mathrm{PS}}(r)=u_{\mathrm{AE}}(r), \qquad r>r_c .
+          \end{equation}
+    \item \textbf{核内平滑性}：在 $0\le r\le r_c$ 内无节点且足够光滑（高阶导数连续），避免非物理振荡。
+    \item \textbf{范数守恒}：核内积分范数一致
+          \begin{equation}
+              \int_0^{r_c} |u_{\mathrm{PS}}(r)|^2\,dr=\int_0^{r_c} |u_{\mathrm{AE}}(r)|^2\,dr .
+          \end{equation}
+\end{enumerate}
+直观上，范数守恒确保核附近电荷分布的局域信息在伪化后保持一致；在散射理论中，它与相移对能量的一阶导数相关，
+因此有助于提高赝势在不同化学环境下的可转移性（transferability）。
+
+\subsection{Troullier--Martins 伪化方法}
+
+\subsubsection{径向方程与记号}
+
+在球对称势场下，三维薛定谔方程可分离变量。
+令 $u_{nl}(r)=rR_{nl}(r)$ 为径向规约波函数，则径向本征方程为
+\begin{equation}
+    \left[-\frac{1}{2}\frac{d^2}{dr^2}+\frac{l(l+1)}{2r^2}+V_l(r)\right]u_{nl}(r)=\varepsilon_{nl}u_{nl}(r),
+\end{equation}
+其中 $V_l(r)$ 为角动量通道相关的半局域（semilocal）势（对 AE 解而言可理解为 Kohn--Sham 有效势，不含离心项的部分）。
+
+\subsubsection{TM 伪波函数形式}
+
+TM 方法在核内区域选取指数多项式形式以保证无节点与解析性。
+在 $r\le r_c$ 内，取
+\begin{equation}
+    u_l(r)=r^{l+1}\exp\left(\sum_{i=0}^{N}a_{2i}r^{2i}\right),
+    \qquad r\le r_c .
+\end{equation}
+其中 $r^{l+1}$ 保障原点处 $u_l(0)=0$ 的正确行为；仅使用偶次幂使所有阶导数在 $r=0$ 处连续；
+指数形式 $\exp(\cdot)$ 保证 $u_l(r)$ 在核内正定，从而避免引入额外节点。
+
+\subsubsection{连续性约束与方程组}
+
+TM 伪化要求在 $r=r_c$ 处与 AE 波函数平滑拼接。一般可要求函数值及若干阶导数连续。
+在 AtomPPGen 的教学实现中，采用 $N=2$（求解 $a_0,a_2,a_4,a_6$ 共四个系数），并施加四个约束：
+\begin{enumerate}
+    \item $u(r_c)$ 匹配；
+    \item $u'(r_c)$ 匹配；
+    \item $u''(r_c)$ 匹配；
+    \item 核内范数守恒。
+\end{enumerate}
+将这些约束写成残差方程 $\mathbf{F}(\mathbf{a})=\mathbf{0}$，可用非线性求解器得到系数 $\mathbf{a}$。
+求解完成后，定义分段伪波函数
+\begin{equation}
+    u_{\mathrm{PS}}(r)=
+    \begin{cases}
+        r^{l+1}\exp\left(\sum_{i=0}^{N}a_{2i}r^{2i}\right), & r\le r_c, \\
+        u_{\mathrm{AE}}(r),                                 & r>r_c.
+    \end{cases}
+\end{equation}
+因此在核外区域，伪波函数与 AE 波函数严格重合；这也是后续图像中 $r>r_c$ 区域吻合的直接原因。
+
+\subsection{半局域势反演}
+
+在得到伪波函数 $u_{\mathrm{PS}}(r)$ 及其对应能量 $\varepsilon_l$ 后，可以将径向方程反过来解出半局域势：
+\begin{equation}
+    V_l(r)=\varepsilon_l+\frac{1}{2}\frac{u''(r)}{u(r)}-\frac{l(l+1)}{2r^2}.
+    \label{eq:invert_basic}
+\end{equation}
+该式说明反演对二阶导数非常敏感，因此数值实现必须避免节点附近的 $u''/u$ 发散。
+
+\subsubsection{内区解析导数}
+
+对 TM 内区形式，令 $p(r)=\sum_{i=0}^{N}a_{2i}r^{2i}$，
+则可解析得到
+\begin{equation}
+    \frac{u''(r)}{u(r)}=\frac{l(l+1)}{r^2}+\frac{2(l+1)p'(r)}{r}+p'(r)^2+p''(r).
+\end{equation}
+代回式\eqref{eq:invert_basic}，离心项相消后得到更稳定的表达
+\begin{equation}
+    V_l(r)=\varepsilon_l+\frac{l+1}{r}p'(r)+\frac{1}{2}\left[p'(r)^2+p''(r)\right],
+    \qquad r\le r_c .
+\end{equation}
+该形式完全避免了数值微分与除以 $u(r)$ 的放大效应，因此在核内更稳定。
+
+\subsubsection{外区样条导数与节点保护}
+
+在 $r>r_c$ 的核外区域，$u_{\mathrm{PS}}(r)=u_{\mathrm{AE}}(r)$，一般不再具有简单解析形式。
+AtomPPGen 采用三次样条（cubic spline）对 $u(r)$ 做局部插值求导，从而得到 $u''(r)$ 并代回式\eqref{eq:invert_basic}。
+
+当 $u(r)$ 在某些点接近零（节点附近），$u''(r)/u(r)$ 可能数值发散。为此实现中引入节点阈值：
+对满足 $|u(r_i)|<\epsilon_{\mathrm{tol}}$ 的点暂不直接计算势，而在邻近的非节点区域求势后对节点区插值填充。
+此外，为避免极端异常值影响后续步骤，对 $V_l(r)$ 可做裁剪
+\begin{equation}
+    V_l(r)\in[-V_{\max},V_{\max}],
+\end{equation}
+其中 $V_{\max}$ 为预设上限（教学实现中取 $10^3$ Ha 量级）。
+
+\subsection{Kleinman--Bylander（KB）可分离形式}
+
+\subsubsection{半局域势的平面波表示困难}
+
+半局域赝势算符可写成角动量投影算符之和
+\begin{equation}
+    \hat V^{\mathrm{SL}}=\sum_{l,m}\ket{Y_{lm}}\;V_l(r)\;\bra{Y_{lm}},
+\end{equation}
+其中 $Y_{lm}$ 为球谐函数。平面波基函数 $e^{i\mathbf{G}\cdot\mathbf{r}}$ 不携带固定 $l,m$，
+因此直接作用半局域势需要做球谐展开并对通道求和，在实际平面波代码中代价较高。
+
+\subsubsection{KB 变换的结构}
+
+KB 的核心思想是：选择一个角动量通道 $l^*$ 作为局域势
+\begin{equation}
+    V_{\mathrm{loc}}(r)=V_{l^*}(r),\qquad \Delta V_l(r)=V_l(r)-V_{\mathrm{loc}}(r),
+\end{equation}
+并将剩余非局域部分写成有限秩（可分离）投影形式。对每个 $l\ne l^*$，取参考径向函数
+\begin{equation}
+    \phi_l(r)=\frac{u_l(r)}{r},
+\end{equation}
+构造未归一化投影子
+\begin{equation}
+    \chi_l(r)=\Delta V_l(r)\phi_l(r),
+\end{equation}
+并定义
+\begin{equation}
+    W_l=\braket{\chi_l|\chi_l},\qquad
+    Z_l=\braket{\phi_l|\Delta V_l|\phi_l}.
+\end{equation}
+则归一化投影子与耦合系数为
+\begin{equation}
+    \beta_l(r)=\frac{\chi_l(r)}{\sqrt{W_l}},\qquad
+    D_l=\frac{W_l}{Z_l}.
+\end{equation}
+最终的 KB 非局域项写成
+\begin{equation}
+    \hat V_{\mathrm{NL}}^{\mathrm{KB}}=\sum_{l\ne l^*}\sum_m \ket{\beta_{lm}}D_l\bra{\beta_{lm}},
+\end{equation}
+其中 $\beta_{lm}(\mathbf{r})=\beta_l(r)Y_{lm}(\hat{\mathbf{r}})$。
+在平面波计算中，矩阵元可写成重叠积分乘积的和，
+从而将非局域势作用的计算复杂度显著降低。
+
+\subsubsection{局域道选择的经验}
+
+在许多元素中，常用较高角动量、且对基态贡献较小的通道作为局域道，例如 Al 案例中选择 $d$ 通道作为 $V_{\mathrm{loc}}$，
+并对 $s/p$ 通道通过非局域投影进行校正。这样做的动机是：
+价电子主导通道需要更严格地匹配散射性质，而高角动量通道对基态较不敏感，适合作为背景局域势。
+
+\subsection{可转移性验证方法}
+
+赝势生成后必须验证其可转移性，避免在不同化学环境下出现散射性质偏差或非物理束缚态。
+AtomPPGen 实现了三类常用验证：范数守恒检验、对数导数匹配与幽灵态检测。
+
+\subsubsection{范数守恒检验}
+
+TM 伪化在构造过程中通过方程组强制满足范数守恒，但仍可在数值上输出相对误差
+\begin{equation}
+    \Delta_{\mathrm{norm}}=\frac{Q_{\mathrm{PS}}-Q_{\mathrm{AE}}}{Q_{\mathrm{AE}}},\qquad
+    Q=\int_0^{r_c}u(r)^2\,dr .
+\end{equation}
+通常的验收标准为 $|\Delta_{\mathrm{norm}}|<10^{-6}$；在高精度实现下可达到 $10^{-13}$ 量级的数值极限。
+本文 Al（LDA）案例的验证报告给出：
+\begin{equation}
+    |\Delta_{\mathrm{norm}}^{(s)}| \approx 1.6\times 10^{-16},\quad
+    |\Delta_{\mathrm{norm}}^{(p)}| \approx 1.1\times 10^{-13},\quad
+    |\Delta_{\mathrm{norm}}^{(d)}| \approx 1.0\times 10^{-13}.
+\end{equation}
+
+\subsubsection{对数导数（Logarithmic Derivative）匹配}
+
+对数导数定义为
+\begin{equation}
+    L(E,r)=r\frac{d\ln\psi(E,r)}{dr}=r\frac{\psi'(E,r)}{\psi(E,r)}.
+\end{equation}
+当 $r=r_{\mathrm{test}}$ 取在核外区域（通常 $r_{\mathrm{test}}\gtrsim r_c$）时，
+散射解可写成携带相移 $\delta_l(E)$ 的渐近形式
+\begin{equation}
+    u_l(r)\propto \sin\left(kr-\frac{l\pi}{2}+\delta_l(E)\right),\qquad k=\sqrt{2E},
+\end{equation}
+代入得
+\begin{equation}
+    L_l(E,r)=kr\cot\left(kr-\frac{l\pi}{2}+\delta_l(E)\right).
+\end{equation}
+因此在固定 $r_{\mathrm{test}}$ 下比较 AE 与 PS 的 $L(E)$ 曲线，等价于比较它们的散射相移随能量的变化。
+
+\paragraph{极点与尖峰的来源}
+当某个能量下 $\psi(E,r_{\mathrm{test}})=0$ 时，$L(E,r_{\mathrm{test}})$ 存在极点（分母为零），曲线会出现尖峰。
+这不是赝势必然“失败”的信号，而是对数导数定义本身的数学特征。
+在数值评价中，AtomPPGen 会对 $|L|$ 过大的点做离群过滤（例如 $|L|>50$），以避免极点附近的单点对 RMS 指标产生不成比例的影响。
+
+\paragraph{评价指标与阈值}
+AtomPPGen 采用两类紧凑指标：
+\begin{enumerate}
+    \item \textbf{零点偏差（可选）}：若扫描窗口内 AE/PS 都出现足够多的过零点，可比较零点能量的均方根偏差
+          \begin{equation}
+              \Delta E_{\mathrm{RMS}}=\sqrt{\frac{1}{N}\sum_{i=1}^N\left(E_i^{\mathrm{AE}}-E_i^{\mathrm{PS}}\right)^2},
+          \end{equation}
+          典型阈值为 $\Delta E_{\mathrm{RMS}}<0.025$ Ha。
+    \item \textbf{曲线 RMS（主要）}：在价区窗口（例如 $E\in[-0.05,0.05]$ Ha）计算
+          \begin{equation}
+              L_{\mathrm{RMS}}^{\mathrm{val}}=\sqrt{\frac{1}{M}\sum_{j=1}^M\left[L_{\mathrm{AE}}(E_j)-L_{\mathrm{PS}}(E_j)\right]^2}.
+          \end{equation}
+          对金属元素（Al、Na 等）取阈值 $L_{\mathrm{RMS}}^{\mathrm{val}}<16.0$，
+          对共价元素（Si 等）取更严格阈值 $L_{\mathrm{RMS}}^{\mathrm{val}}<3.0$。
+\end{enumerate}
+
+\subsubsection{幽灵态（Ghost State）检测：能量感知分类}
+
+幽灵态是赝势哈密顿量中出现的非物理深束缚态，若其能量落在价电子附近，会导致平面波计算产生错误的基态或能带结构。
+在径向框架下，可对每个 $l$ 通道构造径向哈密顿量
+\begin{equation}
+    \hat H_l=-\frac{1}{2}\frac{d^2}{dr^2}+V_l^{\mathrm{PS}}(r)+\frac{l(l+1)}{2r^2},
+\end{equation}
+在有限盒区间上离散后对角化，得到能量谱并筛选能量窗口内的束缚态候选。
+
+有限盒截断会把连续散射谱离散化为一系列“盒态”（box states），它们并非真正束缚态。
+AtomPPGen 使用尾部比例
+\begin{equation}
+    \tau=\frac{|\psi(R_{\max})|}{\max_r|\psi(r)|}
+\end{equation}
+对盒态做初步判别（$\tau$ 较大表示边界未充分衰减）。
+
+进一步地，为减少对金属体系的虚假误判，引入\textbf{能量感知分类}：
+设 $\varepsilon_{\mathrm{val}}$ 为该通道参考价态能量，取能量容差 $\delta=0.01$ Ha，则
+\begin{enumerate}
+    \item $E>0$：正能散射态（盒态离散化），归为安全态；
+    \item $0>E>\varepsilon_{\mathrm{val}}-\delta$：Rydberg 激发态序列（高主量子数束缚态），对基态 DFT 影响可忽略；
+    \item $E<\varepsilon_{\mathrm{val}}-\delta$：潜在危险幽灵态，需要结合 $\tau$ 二次判别。
+\end{enumerate}
+该分类的一个重要物理含义是：在能量接近电离阈值（$E\to 0^-$）时，赝势可能支持一系列浅束缚态或近阈值态，
+它们与价态能量相隔较远（高于 $\varepsilon_{\mathrm{val}}-\delta$），因此对基态 DFT 的影响可忽略。
+能量感知分类的目的正是将这类“安全态”与可能影响价区的真幽灵态区分开来，避免虚假误判。
+
+\section{数值方法}
+
+\subsection{TM 非线性方程组求解}
+
+以 $N=2$ 为例，未知参数为 $\mathbf{a}=(a_0,a_2,a_4,a_6)$。
+在 $r=r_c$ 处需要计算 $u_{\mathrm{AE}}(r_c)$、$u'_{\mathrm{AE}}(r_c)$、$u''_{\mathrm{AE}}(r_c)$，
+并计算 AE 核内范数 $Q_{\mathrm{AE}}=\int_0^{r_c}u_{\mathrm{AE}}(r)^2dr$。
+将 TM 内区形式及其导数代入约束即可得到残差方程组。
+
+AtomPPGen 采用 \texttt{scipy.optimize.fsolve} 求解该非线性方程组。
+合理的初值对收敛性非常关键，常用估计为
+\begin{equation}
+    a_0\approx \ln\left(\frac{u_{\mathrm{AE}}(r_c)}{r_c^{l+1}}\right),\qquad a_{2i}=0\;(i\ge 1),
+\end{equation}
+即保证在 $r_c$ 处函数值量级正确，其余高阶系数从零开始，由求解器迭代调整。
+
+\subsection{数值稳定性要点}
+
+\subsubsection{节点符号处理（以 p 通道为例）}
+
+高角动量通道的径向波函数常带节点；若在读取或插值过程中丢失节点处的符号信息，
+则核内积分与连续性约束会被破坏，表现为范数误差显著增大。
+AtomPPGen 在 TM 伪化实现中对节点符号进行了显式处理，从而保证范数守恒与后续 KB 投影构造的稳定性。
+
+\subsubsection{指数溢出与对数形式计算}
+
+TM 内区含有 $\exp(p(r))$，当 $p(r)$ 在数值上过大时可能溢出。
+稳健做法是在必要时以对数形式计算
+\begin{equation}
+    \ln u(r)=(l+1)\ln r+p(r),
+\end{equation}
+并在最终需要 $u(r)$ 时再指数化（同时配合裁剪），以避免中间溢出导致的 NaN。
+
+\subsubsection{对数导数尖峰的离群过滤}
+
+如前所述，$L(E,r)$ 在 $u(E,r)=0$ 附近有极点。
+为避免少数尖峰主导 RMS 指标，AtomPPGen 在对数导数评价前过滤 $|L|$ 过大的点。
+在绘图与写作时也应采用过滤后的曲线作为展示版本，同时在文字中说明尖峰的数学来源。
+
+\subsection{径向网格与 AtomSCF 的变量变换方法}
+
+AtomPPGen 的 AE 参考解由 AtomSCF 产生。AtomSCF 支持多种径向网格：
+线性网格、对数网格以及指数变换网格（exp\_transformed）。
+其中指数变换网格形式为
+\begin{equation}
+    r_j=R_p\left(e^{j\delta}-1\right),\qquad j=0,1,\dots,N-1 .
+\end{equation}
+配合变量变换 $u(r)=v(r)\exp\left(-r/(2R_p)\right)$ 并取 $R_p=1/\delta$，
+可在离散化后消除一阶导数项，使哈密顿量矩阵保持对称，从而在同等网格规模下提升本征值精度。
+该方法同时包含 $r=0$ 点，对原子近核区解析性更友好。
+
+\section{程序实现}
+
+\subsection{整体工作流与模块关系}
+
+AtomPPGen 的核心工作流可概括为：
+\begin{enumerate}
+    \item 由 AtomSCF 求解 AE 原子（LDA 模式）得到 $\{u_{\mathrm{AE}}^l(r),\varepsilon_l\}$；
+    \item 对每个通道执行 TM 伪化，得到 $u_{\mathrm{PS}}^l(r)$ 与范数误差；
+    \item 由伪波函数反演半局域势 $V_l^{\mathrm{PS}}(r)$；
+    \item 选择局域道并构造 KB 投影子 $\beta_l$ 与系数 $D_l$；
+    \item 运行验证：范数守恒、对数导数匹配、幽灵态检测；
+    \item 导出 JSON/NPZ 数据，供文档与后续平面波程序使用。
+\end{enumerate}
+
+对应的主要模块文件为：
+\begin{itemize}
+    \item \texttt{ae\_atom.py}：封装 AtomSCF，生成 AEAtomResult（网格、波函数、能量、密度与能量分解等）；
+    \item \texttt{tm.py}：TM 伪化求解器，输出 TMResult（含伪波函数、系数、范数误差等）；
+    \item \texttt{invert.py}：半局域势反演，输出 InvertResult（$V_l(r)$ 及诊断信息）；
+    \item \texttt{kb.py}：KB 变换，输出局域势 $V_{\mathrm{loc}}$、投影子 $\beta_l$ 与系数 $D_l$；
+    \item \texttt{validate.py}：验证工具（范数/对数导数/幽灵态）与汇总报告；
+    \item \texttt{export.py}：导出 JSON/NPZ（当前实现以数值数组为主，UPF 格式框架已预留）。
+\end{itemize}
+
+更详细的 API 说明、教程与示例脚本可参阅项目在线文档。
+
+\subsection{关键接口示例（最小工作流）}
+
+下面给出一个尽量精简的示例，展示从 AE 求解到验证与导出的主流程（省略异常处理与绘图）：
+\begin{lstlisting}[language=Python, caption={AtomPPGen 最小工作流示例（节选）}]
+from atomppgen.ae_atom import solve_ae_atom
+from atomppgen.tm import tm_pseudize
+from atomppgen.invert import invert_semilocal_potential
+from atomppgen.kb import kb_transform
+from atomppgen.validate import run_full_validation
+from atomppgen.export import export_pseudopotential
+
+ae = solve_ae_atom(Z=13, spin_mode="LDA", lmax=2)
+
+rc_map = {0: 2.1, 1: 2.2, 2: 2.4}
+tm_results = {}
+inv_results = {}
+for l in (0, 1, 2):
+    tm_results[l] = tm_pseudize(
+        r=ae.r, w=ae.w,
+        u_ae=ae.u_by_l[l][-1],
+        eps=ae.eps_by_l[l][-1],
+        l=l, rc=rc_map[l],
+        continuity_orders=2,
+    )
+    inv_results[l] = invert_semilocal_potential(tm_results[l], ae.r)
+
+u_by_l = {l: ae.u_by_l[l][-1] for l in (0, 1, 2)}
+kb = kb_transform(inv_results, u_by_l, ae.r, ae.w, loc_channel=2)
+
+report = run_full_validation(ae, tm_results, inv_results, r_test=2.9)
+export_pseudopotential(ae, tm_results, inv_results, report,
+                       output_prefix="test_results/al_lda", formats=["json", "npz"])
+\end{lstlisting}
+
+\subsection{测试覆盖}
+
+AtomPPGen 在 \texttt{tests/} 目录中提供了单元测试与集成测试，用于覆盖 TM 伪化、势反演、KB 变换与验证模块的关键路径。
+项目当前包含约 60 个测试用例，作为赝势生成与验证正确性的回归保障。
+
+\section{计算结果}
+
+\subsection{Al（LDA）验证结果}
+
+\subsubsection{参数选择}
+
+以 Al（$Z=13$）为主案例，采用 LDA（Perdew--Zunger 1981 参数化）作为交换关联泛函。
+推荐的截断半径与局域道选择如表\ref{tab:al_params}。
+
+\begin{table}[H]
+    \centering
+    \caption{Al（LDA）赝势生成的推荐参数（Bohr）。}
+    \label{tab:al_params}
+    \begin{tabular}{cccc}
+        \toprule
+        $r_c^s$ & $r_c^p$ & $r_c^d$ & KB 局域道 \\
+        \midrule
+        2.1     & 2.2     & 2.4     & $d$ 通道 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{波函数对比（AE vs PS）}
+
+图\ref{fig:al_wf_3panel} 展示 Al 的 $3s/3p$ 价层参考态以及 $d$ 通道参考函数在 AE 与 PS 情况下的对比。
+由于 TM 伪化在 $r>r_c$ 强制 $u_{\mathrm{PS}}(r)=u_{\mathrm{AE}}(r)$，因此核外区域两条曲线应严格重合；
+核内区域 PS 波函数更平滑，且不引入额外节点。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/al_wavefunction_3panel.png}
+    \caption{Al 各通道径向波函数对比：AE（实线）与 PS（虚线）。垂直虚线为截断半径 $r_c$。}
+    \label{fig:al_wf_3panel}
+\end{figure}
+
+\paragraph{半局域势的通道差异}
+在 TM 伪化与势反演后，可得到三通道半局域赝势 $V_l^{\mathrm{PS}}(r)$。
+图\ref{fig:al_potential} 给出 $s/p/d$ 通道势的对比以及对应的截断半径位置。
+该图用于直观展示：不同 $l$ 通道在核内的有效势形状存在差异；在本 LDA 原子参考下，远离原子核后势能逐渐衰减并趋于较小的量级，
+从而核外区域的通道差异显著减弱。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.82\textwidth]{figures/al_potential_compare.png}
+    \caption{Al：$s/p/d$ 三通道半局域赝势 $V_l^{\mathrm{PS}}(r)$ 对比（虚线标注各通道截断半径）。}
+    \label{fig:al_potential}
+\end{figure}
+
+\subsubsection{范数守恒精度}
+
+表\ref{tab:al_norm} 给出 Al 的 $s/p/d$ 通道范数误差数量级。验收标准为 $|\Delta_{\mathrm{norm}}|<10^{-6}$，
+该实现能达到 $10^{-13}$ 甚至 $10^{-16}$ 量级，属于数值极限范围。
+
+\begin{table}[H]
+    \centering
+    \caption{Al（LDA）范数守恒误差（来自验证报告摘要）。}
+    \label{tab:al_norm}
+    \begin{tabular}{cccc}
+        \toprule
+        通道  & 最大 $|\Delta_{\mathrm{norm}}|$ & 标准要求       & 结论   \\
+        \midrule
+        $s$ & $1.58\times 10^{-16}$         & $<10^{-6}$ & PASS \\
+        $p$ & $1.08\times 10^{-13}$         & $<10^{-6}$ & PASS \\
+        $d$ & $1.04\times 10^{-13}$         & $<10^{-6}$ & PASS \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{对数导数匹配}
+
+对数导数验证在测试半径 $r_{\mathrm{test}}$ 处扫描能量窗口，并比较 AE 与 PS 的 $L(E)$ 曲线。
+对金属元素采用价区曲线 RMS 阈值 $<16.0$。
+Al 的推荐参数组在价区窗口的对数导数 RMS 如表\ref{tab:al_logderiv}。
+
+\begin{table}[H]
+    \centering
+    \caption{Al（LDA）对数导数价区 RMS（$E\in[-0.05,0.05]$ Ha）。}
+    \label{tab:al_logderiv}
+    \begin{tabular}{cccc}
+        \toprule
+        通道  & $L_{\mathrm{RMS}}^{\mathrm{val}}$ & 阈值（金属）  & 结论   \\
+        \midrule
+        $s$ & 8.70                              & $<16.0$ & PASS \\
+        $p$ & 0.60                              & $<16.0$ & PASS \\
+        $d$ & 0.10                              & $<16.0$ & PASS \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+图\ref{fig:al_logderiv} 给出对数导数曲线示意。为保证测试点位于核外匹配区，本文采用
+\begin{equation}
+    r_{\mathrm{test}}=\max(r_c^l)+0.5,
+\end{equation}
+对本参数组有 $r_{\mathrm{test}}=2.9$ Bohr。需要强调：$L(E,r)$ 在 $\psi(E,r_{\mathrm{test}})=0$ 附近会出现极点，
+因此曲线可能出现尖峰；在评价与绘图时应对 $|L|$ 过大的离群点做过滤，并在报告中注明该尖峰的数学来源。
+该取值用于本文的 Al 示例；Si、Na 的 $r_{\mathrm{test}}$ 取值以其验证文档的设置为准（见表\ref{tab:si_na_summary}）。
+
+\paragraph{为何金属元素的 $s$ 通道差异更“显眼”}
+对金属元素（如 Al），在核外匹配区的有效势相对平缓，价电子散射解的相位对能量的变化往往较慢，
+从而使 $L_s(E,r_{\mathrm{test}})$ 在价区呈现“缓变”特征。此时 AE 与 PS 若存在一定相位差，
+在 $L(E)=kr\cot(kr-l\pi/2+\delta_l(E))$ 的映射下可能被放大，表现为两条曲线在纵轴上分离较明显。
+因此，金属元素的对数导数评价通常采用更宽松的阈值（本实现取 $L_{\mathrm{RMS}}^{\mathrm{val}}<16.0$），
+并优先关注价区窗口 $E\in[-0.05,0.05]$ Ha 内的 RMS 指标，而非要求整段能量范围内逐点重合。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/al_logderiv.png}
+    \caption{Al：对数导数匹配曲线示意（过滤 $|L|>50$ 的离群点后绘制）。上：$s$ 通道；下：$p$ 通道。}
+    \label{fig:al_logderiv}
+\end{figure}
+
+\paragraph{KB 投影子的径向形状}
+选择 $d$ 通道作为局域道后，KB 非局域部分仅对 $s/p$ 通道构造投影子 $\beta_l(r)$。
+图\ref{fig:al_kb} 给出 $\beta_s(r)$ 与 $\beta_p(r)$ 的典型形状：它们主要局域在核附近，并在远离原子核后快速衰减，
+这反映了 $\Delta V_l(r)=V_l(r)-V_{\mathrm{loc}}(r)$ 的短程性质。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/al_kb_projectors.png}
+    \caption{Al：KB 投影子曲线（左：$s$ 通道；右：$p$ 通道；$d$ 通道作为局域道不构造投影子）。}
+    \label{fig:al_kb}
+\end{figure}
+
+\subsubsection{幽灵态检测与能量感知分类}
+
+KB 形式下的幽灵态检测可视为对“是否出现额外束缚解”的数值排查：在有限径向边界上对径向哈密顿量对角化，得到一组离散本征值。
+由于有限边界会将连续散射谱离散化，同时 $E\to 0^-$ 附近存在一系列 Rydberg 激发态，因此需要结合能量位置与尾部指标进行分类，
+避免将“盒态/激发态”误判为真幽灵态。
+
+本文以 $s$ 通道为例，取价态能量 $\varepsilon_{3s}\approx -0.247$ Ha，并使用能量容差 $\delta=0.01$ Ha：
+$E>0$ 的点归为盒态/散射态离散化产物，$0>E>\varepsilon_{3s}-\delta$ 的点归为 Rydberg 激发态，
+更深的 $E<\varepsilon_{3s}-\delta$ 才作为潜在幽灵态候选。对本参数组，在 $E\in[-0.15,0.05]$ Ha 内
+$s$ 通道得到 3 个 Rydberg 态与 9 个盒态/散射态离散化产物，未检出真幽灵态。
+
+图\ref{fig:al_ghost_energy} 将该能量窗口内的本征值按能量感知规则分类并可视化：绿色为 Rydberg 激发态，
+蓝色为盒态/散射态离散化产物，红色（若出现）为潜在幽灵态；同时标注了价态能量 $\varepsilon_{3s}$ 及阈值
+$\varepsilon_{3s}-0.01$ Ha 的位置，便于直观理解分类边界。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/al_ghost_energy_classification.png}
+    \caption{Al：幽灵态能谱分类示意（$s$ 通道，能量感知分类）。黑实线为 $\varepsilon_{3s}$，灰虚线为 $\varepsilon_{3s}-0.01$ Ha。}
+    \label{fig:al_ghost_energy}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \caption{Al（LDA）幽灵态检测摘要（能量窗口 $E\in[-0.15,0.05]$ Ha）。}
+    \label{tab:al_ghost}
+    \begin{tabular}{cccc}
+        \toprule
+        通道  & Rydberg 数 & 盒态/散射态数 & 真幽灵态数 \\
+        \midrule
+        $s$ & 3         & 9       & 0     \\
+        $p$ & --        & --      & 1     \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+其中 $p$ 通道在本次验证中检出 1 个幽灵态计数；由于本文未给出其能谱分类图，这里仅作为风险提示，
+需要结合能量位置与尾部比例进一步判定其物理影响。
+
+\subsubsection{p 通道的节点符号处理影响}
+
+对 $p$ 通道而言，若在伪化过程中未正确处理径向节点的符号信息，会导致范数守恒误差显著增大。
+表\ref{tab:al_p_fix} 给出不同 $r_c^p$ 下，在未进行节点符号处理与进行节点符号处理两种情况下的范数误差对比。
+可以看到，加入节点符号处理后误差回到 $10^{-13}$ 量级，且随 $r_c^p$ 变化保持稳定。
+
+\begin{table}[H]
+    \centering
+    \caption{$p$ 通道节点符号处理对范数守恒的影响（Al，LDA）。}
+    \label{tab:al_p_fix}
+    \begin{tabular}{ccc}
+        \toprule
+        $r_c^p$ (Bohr) & 未处理节点符号的范数误差         & 处理后范数误差               \\
+        \midrule
+        2.2            & $1.74\times 10^{-2}$ & $1.08\times 10^{-13}$ \\
+        2.3            & $1.87\times 10^{-2}$ & $1.31\times 10^{-16}$ \\
+        2.4            & $9.67\times 10^{-1}$ & $4.51\times 10^{-15}$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Si 与 Na 的对比案例（简述）}
+
+为展示“金属/共价”阈值策略的差异，AtomPPGen 还给出了 Si（共价）与 Na（简单金属）的教学示例验证结果。
+表\ref{tab:si_na_summary} 汇总了典型参数与对数导数价区 RMS。
+
+\begin{table}[H]
+    \centering
+    \caption{Si 与 Na 的示例验证摘要（LDA）。}
+    \label{tab:si_na_summary}
+    \begin{tabular}{cccccc}
+        \toprule
+        元素                  & $(r_c^s,r_c^p,r_c^d)$ (Bohr)     & $r_{\mathrm{test}}$ (Bohr) & 通道  & $L_{\mathrm{RMS}}^{\mathrm{val}}$ & 阈值      \\
+        \midrule
+        \multirow{3}{*}{Si} & \multirow{3}{*}{(1.8, 2.0, 2.2)} & \multirow{3}{*}{6.0}       & $s$ & 2.31                              & $<3.0$  \\
+                            &                                  &                            & $p$ & 0.49                              & $<3.0$  \\
+                            &                                  &                            & $d$ & 0.31                              & $<3.0$  \\
+        \midrule
+        \multirow{3}{*}{Na} & \multirow{3}{*}{(2.6, 2.8, 3.0)} & \multirow{3}{*}{3.5}       & $s$ & 2.16                              & $<16.0$ \\
+                            &                                  &                            & $p$ & 0.12                              & $<16.0$ \\
+                            &                                  &                            & $d$ & 0.09                              & $<16.0$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+在这两组示例中，幽灵态检测均未发现真幽灵态；报告中出现的少量盒态为有限边界离散化产物，
+不影响通过判定。
+
+\section{误差分析}
+
+\subsection{与 NIST 原子数据对比}
+
+AtomPPGen 的 AE 参考解依赖 AtomSCF 的非相对论 LDA/LSDA 实现。
+表\ref{tab:nist} 给出以 Al 为例的能量对比（单位 Ha）。
+
+\begin{table}[H]
+    \centering
+    \caption{Al 原子能量与 NIST LSD 参考数据对比（单位 Ha）。}
+    \label{tab:nist}
+    \begin{tabular}{cccc}
+        \toprule
+        项目    & AtomSCF & NIST LSD & 差异                         \\
+        \midrule
+        总能量   & -237.30 & -241.32  & $\sim 4$ Ha ($\sim 1.7\%$) \\
+        1s 能级 & -54.27  & -55.15   & $\sim 0.88$ Ha             \\
+        3s 能级 & -0.25   & -0.30    & $\sim 0.05$ Ha             \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+需要指出：NIST 的参考值基于 LSD（局域自旋密度）并可能包含特定的数值细节与边界处理；AtomSCF 的实现为教学用途，
+在网格离散化、泛函参数化细节、以及收敛策略上可能与 NIST 使用的实现存在差异。
+对赝势生成而言，更关键的是价层能级与散射性质的相对一致性，因此价层 $3s/3p$ 的能量偏差（$\sim 0.03$--$0.05$ Ha）
+通常可接受。
+
+\subsection{参数敏感性：截断半径的影响}
+
+截断半径 $r_c$ 决定赝势“软硬”程度：
+\begin{itemize}
+    \item $r_c$ 更小：核内区域更接近 AE，散射性质更易匹配，但势更“硬”，在平面波计算中需要更高的截断能量；
+    \item $r_c$ 更大：赝势更平滑更“软”，平面波代价更低，但对数导数匹配可能恶化，且更易出现投影子数值不稳定或幽灵态风险。
+\end{itemize}
+因此实际应用中需在可转移性与计算效率之间折中。
+Al 的教学示例中通过参数扫描在多个组合中比较范数误差、对数导数 RMS 与幽灵态分类后，选择表\ref{tab:al_params} 的组合
+作为稳定且便于演示的参数。
+
+\subsection{物理与方法局限性}
+
+本项目与本文档的讨论基于以下前提与近似：
+\begin{enumerate}
+    \item \textbf{非相对论近似}：未包含自旋轨道耦合与相对论修正，对重元素需进一步扩展。
+    \item \textbf{局域/半局域 XC 泛函}：以 LDA（PZ81）为主，未包含 GGA、meta-GGA 或杂化泛函效应。
+    \item \textbf{原子参考环境}：赝势以孤立原子参考态构造，真实固体环境中的电荷转移与屏蔽效应需通过可转移性验证间接保证。
+    \item \textbf{幽灵态检测的盒效应}：径向对角化在有限边界上进行，必须结合尾部判据与能量分类排除盒态假信号。
+\end{enumerate}
+
+\section{总结}
+
+本文围绕 AtomPPGen 的模守恒赝势生成与验证流程，主要结论如下：
+\begin{enumerate}
+    \item 采用 TM 伪化在核外强制匹配 AE 波函数，并通过连续性约束与范数守恒方程组得到核内平滑、无节点的伪波函数；
+    \item 通过势反演将伪波函数映射为半局域势，并在内区使用解析导数、外区使用样条导数，同时对节点附近做保护处理；
+    \item 通过 KB 变换将半局域势改写为“局域势 + 少量投影子”的可分离形式，便于平面波程序高效使用；
+    \item 验证方面，Al（LDA）示例在范数守恒上达到 $10^{-13}$ 量级精度；对数导数价区 RMS 满足金属阈值；
+          幽灵态检测通过能量感知分类有效区分 Rydberg 激发态与真幽灵态；
+    \item Si（共价）与 Na（金属）的示例结果展示了不同元素类型下阈值策略的差异化处理。
+\end{enumerate}
+
+\section*{参考文献}
+
+\begin{enumerate}
+    \item Troullier, N. \& Martins, J. L. (1991). Efficient pseudopotentials for plane-wave calculations. \textit{Phys. Rev. B}, 43, 1993--2006.
+    \item Kleinman, L. \& Bylander, D. M. (1982). Efficacious Form for Model Pseudopotentials. \textit{Phys. Rev. Lett.}, 48, 1425--1428.
+    \item Giannozzi, P. (2019). Notes on pseudopotential generation. Quantum ESPRESSO Documentation.
+    \item Rappe, A. M. et al. (1990). Optimized pseudopotentials. \textit{Phys. Rev. B}, 41, 1227--1230.
+    \item Gonze, X. et al. (2002). First-principles computation of material properties. \textit{Comput. Mater. Sci.}, 25, 478--492.
+    \item Martin, R. M. (2004). \textit{Electronic Structure: Basic Theory and Practical Methods}. Cambridge Univ. Press.
+    \item NIST Atomic Reference Data (LSD): \href{https://www.nist.gov/pml/atomic-reference-data-electronic-structure-calculations}{nist.gov/pml/atomic-reference-data}
+    \item AtomPPGen 项目仓库：\href{https://github.com/bud-primordium/AtomPPGen}{github.com/bud-primordium/AtomPPGen}
+    \item AtomSCF 项目仓库：\href{https://github.com/bud-primordium/AtomSCF}{github.com/bud-primordium/AtomSCF}
+\end{enumerate}
+
+\end{document}
